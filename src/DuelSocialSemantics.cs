@@ -56,7 +56,7 @@ namespace ErenshorDeepSims
             // Reason is verified Duel text, but the stable token remains authoritative for social
             // policy.  Keep the text available only as bounded supporting context.
             if (!string.IsNullOrWhiteSpace(Reason)) sb.AppendLine("reason=" + Reason);
-            sb.Append("semantic=friendly non-lethal practice duel using virtual health; no death, kill, loot, XP, reward, wager, permanent injury, or faction hostility is implied by this event");
+            sb.Append("EVENT LIMITS: this was a friendly practice duel. It does not establish a death, kill, loot, XP, reward, wager, lasting injury, or faction hostility");
             return sb.ToString();
         }
 

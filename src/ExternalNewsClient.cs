@@ -64,7 +64,7 @@ namespace ErenshorDeepSims
     {
         private const string GdeltEndpoint = "https://api.gdeltproject.org/api/v2/doc/doc";
         private const string RssEndpoint = "https://news.google.com/rss/search";
-        private const string UserAgent = "ErenshorDeepSims/0.7.1 (+local Lunaris mod)";
+        private const string UserAgent = "ErenshorDeepSims/0.8.2 (+local Lunaris mod)";
 
         // Repeated identical failures (provider outage) should not each pay the full lookup budget.
         private const int NegativeCacheSeconds = 45;
@@ -137,10 +137,18 @@ namespace ErenshorDeepSims
                 }
             }
 
+            int rawResultCount = items.Count;
+            items = ExternalNewsRelevance.Filter(cleanQuery, items);
             string diagnostics = DescribeAttempts(attempts);
-            if (_log != null) _log.LogDebug("External news lookup -> " + items.Count + " item(s); " + DiagnosticPrivacy.DescribeChars("query", cleanQuery) + "; " + diagnostics);
+            if (_log != null) _log.LogDebug("[DeepSims][KnowledgeRoute] source=group need=ExternalNews queryHash=" +
+                SeedHash.Stable(cleanQuery).ToString("x8") + " provider=" + SuccessfulProvider(attempts) +
+                " rawResults=" + rawResultCount + " relevantResults=" + items.Count +
+                " status=" + (items.Count > 0 ? "success" : "no_relevant_results"));
 
             ExternalNewsBundle bundle = BuildBundle(cleanQuery, items, maxChars, diagnostics);
+            bundle.RawResultCount = rawResultCount;
+            bundle.RelevantResultCount = items.Count;
+            bundle.Provider = SuccessfulProvider(attempts);
             lock (_cacheLock)
             {
                 if (bundle.Combined.Found)
@@ -222,6 +230,14 @@ namespace ErenshorDeepSims
             return provider == NewsProviderKind.GoogleRss ? "Google News RSS" : "GDELT";
         }
 
+        private static string SuccessfulProvider(List<NewsProviderAttempt> attempts)
+        {
+            for (int i = 0; attempts != null && i < attempts.Count; i++)
+                if (attempts[i] != null && attempts[i].Succeeded)
+                    return attempts[i].Provider == NewsProviderKind.GoogleRss ? "google_rss" : "gdelt";
+            return "none";
+        }
+
         private static string FailureVerb(string category)
         {
             switch (category)
@@ -292,6 +308,9 @@ namespace ErenshorDeepSims
             ExternalNewsBundle copy = new ExternalNewsBundle();
             copy.Query = src.Query;
             copy.Diagnostics = src.Diagnostics;
+            copy.RawResultCount = src.RawResultCount;
+            copy.RelevantResultCount = src.RelevantResultCount;
+            copy.Provider = src.Provider;
             copy.Combined = src.Combined == null ? null : new WikiResult
             {
                 Query = src.Combined.Query,
@@ -540,6 +559,48 @@ namespace ErenshorDeepSims
         public WikiResult Combined;
         public List<ExternalNewsItem> Items;
         public string Diagnostics; // provider attempts, for /dsxnews and debug logging only - never shown on ordinary /p replies
+        public int RawResultCount;
+        public int RelevantResultCount;
+        public string Provider;
+    }
+
+    internal static class ExternalNewsRelevance
+    {
+        private static readonly HashSet<string> Stop = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "a", "an", "any", "about", "did", "do", "does", "heard", "latest", "news", "new",
+            "recent", "today", "tonight", "current", "currently", "happen", "happened", "with", "the",
+            "there", "what", "whats", "world", "update", "updates", "please", "anything"
+        };
+
+        internal static List<ExternalNewsItem> Filter(string query, IList<ExternalNewsItem> raw)
+        {
+            List<ExternalNewsItem> result = new List<ExternalNewsItem>();
+            HashSet<string> terms = Terms(query);
+            for (int i = 0; raw != null && i < raw.Count; i++)
+            {
+                ExternalNewsItem item = raw[i];
+                if (item == null || string.IsNullOrWhiteSpace(item.Headline) || item.Headline.Trim().Length < 8 ||
+                    string.IsNullOrWhiteSpace(item.Url)) continue;
+                if (terms.Count == 0 || Matches(item, terms)) result.Add(item);
+            }
+            return result;
+        }
+
+        private static bool Matches(ExternalNewsItem item, HashSet<string> terms)
+        {
+            HashSet<string> haystack = Terms((item.Headline ?? string.Empty) + " " + (item.Publisher ?? string.Empty));
+            foreach (string term in terms) if (haystack.Contains(term)) return true;
+            return false;
+        }
+
+        private static HashSet<string> Terms(string text)
+        {
+            HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Match match in Regex.Matches((text ?? string.Empty).ToLowerInvariant(), @"[a-z0-9]{2,}"))
+                if (!Stop.Contains(match.Value)) result.Add(match.Value);
+            return result;
+        }
     }
 
     // Deliberately keyword-only, no LLM, so a plain gameplay line about "news" from a class or NPC

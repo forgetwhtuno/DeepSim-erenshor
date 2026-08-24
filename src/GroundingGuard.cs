@@ -4,6 +4,42 @@ using System.Text.RegularExpressions;
 
 namespace ErenshorDeepSims
 {
+    internal enum SocialClaimKind { SubjectiveSocial, CheckableFactual, AiOrEngineeringLeak }
+
+    internal static class SocialClaimClassifier
+    {
+        internal static SocialClaimKind Classify(string text)
+        {
+            string value = (text ?? string.Empty).Trim();
+            if (value.Length == 0) return SocialClaimKind.SubjectiveSocial;
+            if (GroundingGuard.HasInstructionLeak(value) || GroundingGuard.HasAssistantStyleLanguage(value) ||
+                Regex.IsMatch(value, @"\b(?:as an ai|cannot verify|can't verify|based on (?:the )?(?:available )?evidence|insufficient information|according to (?:the )?(?:provided )?context|grounded|provenance)\b", RegexOptions.IgnoreCase))
+                return SocialClaimKind.AiOrEngineeringLeak;
+            if (Regex.IsMatch(value,
+                @"\b(?:yesterday|earlier|last (?:night|time|week|session)|remember when|ago|today|just now)\b|" +
+                @"\b(?:killed|slain|looted|dropped|gave|received|obtained|equipped|bought|sold|completed|finished the quest|leveled|visited|went to|said|told me|played with|joined|left the group|launched)\b|" +
+                @"\b(?:xp|experience points?|gold|quest|drop rate|level\s*\d+|has (?:a|an|the)\s+\w+\s+(?:sword|staff|item|weapon|armor|armour)|mana\s+(?:is|was|at)|health\s+(?:is|was|at))\b|" +
+                @"\b(?:nasa|spacex|openai|election|market|company)\b[^.!?]{0,50}\b(?:today|current|latest|launched|announced|released)\b",
+                RegexOptions.IgnoreCase)) return SocialClaimKind.CheckableFactual;
+            if (value.IndexOf('?') >= 0 || Regex.IsMatch(value,
+                @"\b(?:like|love|hate|prefer|favorite|favourite|feel|think|guess|reckon|suppose|maybe|probably|possibly|idk|don't know|do not know|no idea|not sure|depends|would|could|should|wanna|want to|wants? to|let's|sounds?\s+(?:fun|rough|stressful|good|bad)|lol|lmao|haha|joking|kinda|sorta|always end up)\b",
+                RegexOptions.IgnoreCase)) return SocialClaimKind.SubjectiveSocial;
+            // Ambiguous declarative lines retain the full validator. Permissiveness is earned by
+            // clear subjective/question/hypothetical framing, never merely by missing a keyword.
+            return SocialClaimKind.CheckableFactual;
+        }
+
+        internal static bool IsPermissiveSocialLine(string text, out string reason)
+        {
+            SocialClaimKind kind = Classify(text);
+            if (kind == SocialClaimKind.SubjectiveSocial) { reason = string.Empty; return true; }
+            reason = kind == SocialClaimKind.AiOrEngineeringLeak
+                ? "assistant/engineering language leakage"
+                : "checkable factual claim requires provenance grounding";
+            return false;
+        }
+    }
+
     internal static class GroundingGuard
     {
         internal static bool IsDirectReplyRelevant(string playerMessage, string reply, out string reason)
@@ -72,6 +108,13 @@ namespace ErenshorDeepSims
                 return false;
             }
 
+            string guidanceReason;
+            if (HasUnsupportedGeneratedGuidance(reply, verifiedSituation, referenceCorpus, out guidanceReason))
+            {
+                reason = guidanceReason;
+                return false;
+            }
+
             string verified = BuildVerifiedCorpus(memory, world, verifiedSituation);
             Match unsupportedTime = Regex.Match(reply, @"\b(yesterday|last night|earlier today|this morning)\b", RegexOptions.IgnoreCase);
             if (unsupportedTime.Success && verified.IndexOf(unsupportedTime.Value, StringComparison.OrdinalIgnoreCase) < 0)
@@ -92,6 +135,20 @@ namespace ErenshorDeepSims
             if (TryFindSelfClassContradiction(reply, memory, world, out selfClassReason))
             {
                 reason = selfClassReason;
+                return false;
+            }
+
+            string selfGuildReason;
+            if (TryFindSelfGuildClaimViolation(reply, memory, world, out selfGuildReason))
+            {
+                reason = selfGuildReason;
+                return false;
+            }
+
+            string authorityReason;
+            if (HasUnsupportedSocialAuthorityClaim(reply, verified, out authorityReason))
+            {
+                reason = authorityReason;
                 return false;
             }
 
@@ -257,6 +314,30 @@ namespace ErenshorDeepSims
             return true;
         }
 
+        // Generated dialogue is expression, never a quest guide. Precise document locators and
+        // actionable quest/map directions require matching verified or retrieved support; a bare
+        // model invention such as "check page 4" must not cross the grounding boundary.
+        internal static bool HasUnsupportedGeneratedGuidance(string reply, string verifiedSituation,
+            string referenceCorpus, out string reason)
+        {
+            reason = string.Empty;
+            if (string.IsNullOrWhiteSpace(reply)) return false;
+            Match locator = Regex.Match(reply, @"\b(?:page|chapter|section)\s+(\d{1,3}|[ivxlcdm]{1,8})\b", RegexOptions.IgnoreCase);
+            bool actionableQuest = Regex.IsMatch(reply,
+                @"\b(?:check|read|see|look\s+(?:at|in)|open|turn\s+to|go\s+to|talk\s+to|find)\b[^.!?]{0,55}\b(?:quest|questlog|quest\s+log|map|page|chapter|section)\b",
+                RegexOptions.IgnoreCase);
+            if (!locator.Success && !actionableQuest) return false;
+
+            string support = (verifiedSituation ?? string.Empty) + "\n" + (referenceCorpus ?? string.Empty);
+            if (locator.Success && support.IndexOf(locator.Value, StringComparison.OrdinalIgnoreCase) >= 0) return false;
+            if (actionableQuest && Regex.IsMatch(support,
+                @"\b(?:check|read|see|look\s+(?:at|in)|open|turn\s+to|go\s+to|talk\s+to|find)\b[^.!?]{0,55}\b(?:quest|questlog|quest\s+log|map|page|chapter|section)\b",
+                RegexOptions.IgnoreCase)) return false;
+
+            reason = "unsupported quest/map/page guidance";
+            return true;
+        }
+
         private static bool IsKnownSpeakerLabel(string label, SimMemory memory, WorldSnapshot world)
         {
             if (string.IsNullOrWhiteSpace(label)) return false;
@@ -307,6 +388,25 @@ namespace ErenshorDeepSims
             AddSelfTestResult(results, "verified exact Manage Roles assignment", "Phanty is assigned Crowd Control.", true, memory, world);
             phanty.ClassName = "Arcanist";
             AddSelfTestResult(results, "wrong guild", "Phanty is in the Thunder guild.", false, memory, world);
+            AddSelfTestResult(results, "verified self guild membership", "I'm with Lantern.", true, memory, world);
+            AddSelfTestResult(results, "unknown recruitment authority", "I can get you into Lantern.", false, memory, world);
+            AddSelfTestResult(results, "unknown invite authority", "I can invite you into the guild.", false, memory, world);
+            AddSelfTestResult(results, "unknown bare invite authority", "I can invite you.", false, memory, world);
+            AddSelfTestResult(results, "ordinary social invitation stays allowed", "I can invite you to dinner.", true, memory, world);
+            AddSelfTestResult(results, "unknown promotion authority", "I'll promote you tomorrow.", false, memory, world);
+            AddSelfTestResult(results, "unknown kick authority", "I can kick them from the guild.", false, memory, world);
+            AddSelfTestResult(results, "harmless guild question has no authority claim", "Have you ever thought about joining a guild?", true, memory, world);
+            AddSelfTestResult(results, "unknown item-give authority", "I'll give you a sword.", false, memory, world);
+            AddSelfTestResult(results, "unknown item-acquisition authority", "I'll get you a sword.", false, memory, world);
+            AddSelfTestResult(results, "unknown teaching authority", "I can teach you that spell.", false, memory, world);
+            AddSelfTestResult(results, "ordinary future social language stays allowed", "I'll give you a hand.", true, memory, world);
+            phanty.GuildName = string.Empty;
+            AddSelfTestResult(results, "unknown self guild membership", "I'm with Dragon Food.", false, memory, world);
+            phanty.GuildName = "Lantern";
+            string capabilityReason;
+            bool explicitCapability = IsGrounded("I can invite you into the guild.", memory, world, "[capability:guild_invite]", out capabilityReason);
+            results.Add("[DeepSims Guard] explicit verified invite capability permits promise: " +
+                (explicitCapability ? "PASS" : "FAIL") + " (" + (string.IsNullOrWhiteSpace(capabilityReason) ? "accepted" : capabilityReason) + ")");
             AddSelfTestResult(results, "false no-new-kills claim", "No new kills yet in Brakke today.", false, memory, world);
             AddSelfTestResult(results, "invented group plan", "Let's stay in Brakke and stop hunting for today.", false, memory, world);
             AddSelfTestResult(results, "verified identity", "Phanty is an Arcanist.", true, memory, world);
@@ -420,6 +520,12 @@ namespace ErenshorDeepSims
             bool isExternalRealWorldNews = !string.IsNullOrWhiteSpace(externalFacts.SourceLabel) &&
                 externalFacts.SourceLabel.IndexOf("external real-world news", StringComparison.OrdinalIgnoreCase) >= 0;
 
+            if (isExternalRealWorldNews && externalFacts.Found && ContradictsRetrievedNews(reply))
+            {
+                reason = "contradicted retrieved evidence";
+                return false;
+            }
+
             if (externalFacts.Found && !string.IsNullOrWhiteSpace(externalFacts.Extract) && !HasKnowledgeRelationSupport(reply, externalFacts))
             {
                 reason = isExternalRealWorldNews
@@ -447,6 +553,25 @@ namespace ErenshorDeepSims
                 }
             }
             return true;
+        }
+
+        internal static bool ContradictsRetrievedNews(string reply)
+        {
+            if (string.IsNullOrWhiteSpace(reply)) return false;
+            return Regex.IsMatch(reply,
+                @"\bno\b[^.!?]{0,48}\b(?:news|headlines?|updates?)\b|\bnothing\s+(?:new|happening)\b|\b(?:isn['’]?t|aren['’]?t)\s+any\s+(?:news|update)\b|\bdoesn['’]?t\s+seem\s+to\s+be\s+any\s+(?:news|update)\b|\bi\s+(?:have not|haven['’]?t)\s+heard\s+(?:anything|any\s+news)\b",
+                RegexOptions.IgnoreCase);
+        }
+
+        internal static string ExternalNewsEvidenceFallback(WikiResult facts)
+        {
+            if (facts == null || !facts.Found || string.IsNullOrWhiteSpace(facts.Extract))
+                return "couldn't find anything relevant right now";
+            string first = facts.Extract.Split(new string[] { " | " }, StringSplitOptions.RemoveEmptyEntries)[0];
+            first = Regex.Replace(first, @"^SOURCE DISAGREEMENT POSSIBLE[^:]*:\s*", string.Empty, RegexOptions.IgnoreCase);
+            first = Regex.Replace(first, @"^\[[^\]]{1,120}\]\s*", string.Empty).Trim();
+            if (first.Length > 180) first = first.Substring(0, 177).TrimEnd() + "...";
+            return string.IsNullOrWhiteSpace(first) ? "couldn't find anything relevant right now" : "looks like " + first;
         }
 
         internal static string KnowledgeCorrectionPrompt(string badReply, string reason)
@@ -524,7 +649,9 @@ namespace ErenshorDeepSims
 
         internal static bool IsSubjectiveDeflection(PartyReplyIntent intent, string text)
         {
-            return PartyReplyIntentClassifier.IsSubjective(intent) && HasUncertaintyLanguage(text);
+            // Casual uncertainty is normal subjective speech. Assistant/engineering boilerplate is
+            // rejected independently by the output guard and SocialClaimClassifier.
+            return false;
         }
 
         internal static bool HasAssistantStyleLanguage(string text)
@@ -568,7 +695,9 @@ namespace ErenshorDeepSims
         {
             return "Your previous draft was rejected because it contained " + reason + ". " +
                    "Rewrite the answer from scratch using ONLY VERIFIED current facts/events already supplied. " +
-                   "Keep self-identity consistent with the verified class. Do not add unverified party readiness/recovery, damage, deaths, loot state, plans, or repeated history. " +
+                   "Keep self-identity consistent with verified class and guild facts. Do not claim guild membership when it is unknown. " +
+                   "Do not promise recruitment/invites, promotions, kicking, items, acquisition, teaching, unlocking, or grants unless a VERIFIED CAPABILITY explicitly authorizes it. " +
+                   "Do not add unverified party readiness/recovery, damage, deaths, loot state, plans, or repeated history. " +
                    "Do not mention raids, bosses, loot, drops, gear, quests, wipes, deaths, kills, or prior runs unless a VERIFIED section explicitly contains that subject. " +
                    "Do not refer to an earlier fight, named opponent, or personal history unless that exact event and name appear in VERIFIED facts. For ordinary small talk, a short mood/opinion or harmless preference is enough. For spontaneous talk, bring up the verified situation directly instead of greeting the party. " +
                    "Do not refer to yourself or another party member as '<name> says'. Return only the replacement chat line.\n" +
@@ -1159,6 +1288,102 @@ namespace ErenshorDeepSims
             return true;
         }
 
+        private static bool TryFindSelfGuildClaimViolation(string reply, SimMemory memory, WorldSnapshot world, out string reason)
+        {
+            reason = string.Empty;
+            if (string.IsNullOrWhiteSpace(reply) || memory == null || string.IsNullOrWhiteSpace(memory.Name) || world == null || world.Party == null) return false;
+
+            SimSnapshot speaker = null;
+            for (int i = 0; i < world.Party.Count; i++)
+            {
+                SimSnapshot member = world.Party[i];
+                if (member != null && string.Equals(member.Name, memory.Name, StringComparison.OrdinalIgnoreCase)) { speaker = member; break; }
+            }
+            if (speaker == null) return false;
+
+            string liveGuild = string.IsNullOrWhiteSpace(speaker.GuildName) ? string.Empty : speaker.GuildName.Trim();
+            bool claimsAnyGuild = Regex.IsMatch(reply,
+                @"\b(?:i(?:'m|\s+am)\s+(?:currently\s+)?in\s+(?:a|the)\s+guild|my\s+guild\s+is|i\s+belong\s+to\s+(?:a|the)\s+guild)\b",
+                RegexOptions.IgnoreCase);
+
+            Match named = Regex.Match(reply,
+                @"\b(?:my\s+guild\s+is|i(?:'m|\s+am)\s+in(?:\s+the)?|i\s+belong\s+to(?:\s+the)?)\s+(?<guild>[A-Za-z0-9'_-]+(?:\s+[A-Za-z0-9'_-]+){0,3})\s+guild\b",
+                RegexOptions.IgnoreCase);
+            if (!named.Success)
+            {
+                // "I'm with Dragon Food" is normal speech, but only treat it as a guild-membership
+                // assertion when it looks like a named organization rather than "I'm with you".
+                named = Regex.Match(reply,
+                    @"\b(?:I(?:'m|\s+am)\s+with)\s+(?:the\s+)?(?<guild>[A-Z][A-Za-z0-9'_-]*(?:\s+[A-Z][A-Za-z0-9'_-]*){0,3})\b");
+            }
+
+            if (!claimsAnyGuild && !named.Success) return false;
+            if (liveGuild.Length == 0)
+            {
+                reason = "unsupported self guild-membership claim";
+                return true;
+            }
+            if (named.Success && !string.Equals(Normalize(named.Groups["guild"].Value), Normalize(liveGuild), StringComparison.OrdinalIgnoreCase))
+            {
+                reason = "contradicts verified self guild membership";
+                return true;
+            }
+            return false;
+        }
+
+        private static bool HasUnsupportedSocialAuthorityClaim(string reply, string verified, out string reason)
+        {
+            reason = string.Empty;
+            if (string.IsNullOrWhiteSpace(reply)) return false;
+
+            string capability = string.Empty;
+            string actor = @"(?:i\s+can|i(?:'ll|\s+will)|let\s+me)";
+            if (Regex.IsMatch(reply, @"\b" + actor + @"\s+(?:get\s+(?:you|him|her|them)\s+into|recruit\s+(?:you|him|her|them)|invite\s+(?:you|him|her|them)\s+(?:into|to)\s+(?:the\s+|my\s+|our\s+|a\s+)?guild)\b", RegexOptions.IgnoreCase) ||
+                Regex.IsMatch(reply, @"\b" + actor + @"\s+invite\s+(?:you|him|her|them)\s*[.!?]?$", RegexOptions.IgnoreCase))
+                capability = "guild_invite";
+            else if (Regex.IsMatch(reply, @"\b" + actor + @"\s+promote\s+(?:you|him|her|them)\b", RegexOptions.IgnoreCase))
+                capability = "guild_promote";
+            else if (Regex.IsMatch(reply, @"\b" + actor + @"\s+kick\s+(?:you|him|her|them)\s+(?:from|out\s+of)\b", RegexOptions.IgnoreCase))
+                capability = "guild_kick";
+            else if (LooksLikeTransferPromise(reply, actor, "give"))
+                capability = "item_give";
+            else if (LooksLikeTransferPromise(reply, actor, "get"))
+                capability = "item_acquire";
+            else if (Regex.IsMatch(reply, @"\b" + actor + @"\s+teach\s+(?:you|him|her|them)\b[^.!?]{0,28}\b(?:spell|skill|ability|recipe|technique)\b", RegexOptions.IgnoreCase) ||
+                     Regex.IsMatch(reply, @"\b" + actor + @"\s+(?:unlock|grant)\b[^.!?]{0,32}\b(?:access|quest|spell|skill|ability|recipe|reward|rank|title)\b", RegexOptions.IgnoreCase))
+                capability = "grant_or_teach";
+
+            if (capability.Length == 0) return false;
+            if (HasVerifiedCapabilityMarker(verified, capability)) return false;
+
+            reason = "unsupported social authority/capability claim: " + capability;
+            return true;
+        }
+
+        private static bool LooksLikeTransferPromise(string reply, string actorPattern, string verb)
+        {
+            Match transfer = Regex.Match(reply,
+                @"\b" + actorPattern + @"\s+" + verb + @"\s+(?:you|him|her|them)\s+(?:an?|the|some|that|this|another)\s+(?<thing>[A-Za-z][A-Za-z'-]*)\b",
+                RegexOptions.IgnoreCase);
+            if (!transfer.Success) return false;
+            string thing = transfer.Groups["thing"].Value.ToLowerInvariant();
+            // Common harmless social idioms are not item/capability promises.
+            return thing != "hand" && thing != "chance" && thing != "time" && thing != "moment" &&
+                   thing != "space" && thing != "advice" && thing != "answer" && thing != "look" &&
+                   thing != "warning" && thing != "idea" && thing != "break";
+        }
+
+        // The current game adapters do not expose a verified guild-rank/recruitment authority surface.
+        // This marker seam lets a future native/current capability reader opt a claim in explicitly
+        // without ever treating guild membership, authored persona, or generated prose as authority.
+        private static bool HasVerifiedCapabilityMarker(string verified, string capability)
+        {
+            if (string.IsNullOrWhiteSpace(verified) || string.IsNullOrWhiteSpace(capability)) return false;
+            return Regex.IsMatch(verified,
+                @"(?:\[\s*capability\s*:\s*" + Regex.Escape(capability) + @"\s*\]|\bverified\s+capability\s+" + Regex.Escape(capability) + @"\b)",
+                RegexOptions.IgnoreCase);
+        }
+
         private static bool TryFindIdentityContradiction(string reply, WorldSnapshot world, out string reason)
         {
             reason = string.Empty;
@@ -1353,10 +1578,11 @@ namespace ErenshorDeepSims
         {
             if (memory == null) return string.Empty;
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
+            AppendAuthoritativeIdentityAndStructuredMemory(sb, memory, false);
             if (memory.ImportantMemories != null)
                 for (int i = 0; i < memory.ImportantMemories.Count; i++) sb.AppendLine(memory.ImportantMemories[i] ?? string.Empty);
             if (memory.OutingSummaries != null)
-                for (int i = 0; i < memory.OutingSummaries.Count; i++) sb.AppendLine(memory.OutingSummaries[i] ?? string.Empty);
+                for (int i = 0; i < memory.OutingSummaries.Count; i++) sb.AppendLine(VerifiedOutingHistoryPolicy.SanitizeForPrompt(memory.OutingSummaries[i]));
             if (memory.RecentEvents != null)
                 for (int i = 0; i < memory.RecentEvents.Count; i++)
                 {
@@ -1369,6 +1595,34 @@ namespace ErenshorDeepSims
                     sb.AppendLine(evt.text ?? string.Empty);
                 }
             return sb.ToString();
+        }
+
+        private static void AppendAuthoritativeIdentityAndStructuredMemory(System.Text.StringBuilder sb, SimMemory memory, bool includeCorePersonality)
+        {
+            if (sb == null || memory == null) return;
+            IdentitySchema.Normalize(memory);
+            AuthoredIdentityProfile a = memory.AuthoredIdentity;
+            if (a != null)
+            {
+                if (includeCorePersonality && !string.IsNullOrWhiteSpace(a.CorePersonality)) sb.AppendLine(a.CorePersonality);
+                if (!string.IsNullOrWhiteSpace(a.PersonalBackground)) sb.AppendLine(a.PersonalBackground);
+                if (!string.IsNullOrWhiteSpace(a.ErenshorPersona)) sb.AppendLine(a.ErenshorPersona);
+                if (!string.IsNullOrWhiteSpace(a.RelationshipToPlayer)) sb.AppendLine(a.RelationshipToPlayer);
+                AppendOwnedRecords(sb, memory, a.SharedHistory);
+                AppendOwnedRecords(sb, memory, a.PinnedMemories);
+            }
+            AppendOwnedRecords(sb, memory, memory.StructuredMemories);
+        }
+
+        private static void AppendOwnedRecords(System.Text.StringBuilder sb, SimMemory memory, List<StructuredMemoryRecord> records)
+        {
+            if (records == null) return;
+            SimSnapshot owner = new SimSnapshot { Key = memory.SimKey, Name = memory.Name };
+            for (int i = 0; i < records.Count; i++)
+            {
+                StructuredMemoryRecord record = records[i];
+                if (record != null && MemoryKnowledgePolicy.CanUse(record, owner)) sb.AppendLine(record.Text ?? string.Empty);
+            }
         }
 
         private static bool HasHistoricalAnchorOverlap(string reply, string historical)
@@ -1420,10 +1674,11 @@ namespace ErenshorDeepSims
             }
             if (memory != null)
             {
+                AppendAuthoritativeIdentityAndStructuredMemory(sb, memory, true);
                 if (memory.ImportantMemories != null)
                     for (int i = 0; i < memory.ImportantMemories.Count; i++) sb.AppendLine(memory.ImportantMemories[i] ?? string.Empty);
                 if (memory.OutingSummaries != null)
-                    for (int i = 0; i < memory.OutingSummaries.Count; i++) sb.AppendLine(memory.OutingSummaries[i] ?? string.Empty);
+                    for (int i = 0; i < memory.OutingSummaries.Count; i++) sb.AppendLine(VerifiedOutingHistoryPolicy.SanitizeForPrompt(memory.OutingSummaries[i]));
                 if (memory.RecentEvents != null)
                     for (int i = 0; i < memory.RecentEvents.Count; i++)
                     {

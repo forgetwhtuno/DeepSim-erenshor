@@ -153,12 +153,12 @@ namespace ErenshorDeepSims
         private readonly object _lock = new object();
         private readonly List<ConversationMoment> _moments = new List<ConversationMoment>();
 
-        internal void Note(string topicKey, string speaker, string text, DateTime now,
+        internal bool Note(string topicKey, string speaker, string text, DateTime now,
             ConversationMomentSource source, long conversationGeneration)
         {
-            if (string.IsNullOrWhiteSpace(text)) return;
+            if (string.IsNullOrWhiteSpace(text)) return false;
             double interest = ConversationCallbackPolicy.InterestScore(text);
-            if (interest < ConversationCallbackPolicy.CandidateThreshold) return;
+            if (interest < ConversationCallbackPolicy.CandidateThreshold) return false;
             string key = string.IsNullOrWhiteSpace(topicKey) ? PromptBuilder.ClassifyThreadTopic(text) : topicKey;
             string summary = text.Trim();
             if (summary.Length > 140) summary = summary.Substring(0, 140).TrimEnd() + "...";
@@ -170,6 +170,7 @@ namespace ErenshorDeepSims
                 PruneLocked(now);
                 while (_moments.Count > MaxMoments) _moments.RemoveAt(0);
             }
+            return true;
         }
 
         // Shortens (rather than deletes outright) any moment on a different topic once a genuinely new
@@ -302,6 +303,31 @@ namespace ErenshorDeepSims
         {
             if (random == null) random = new Random();
             return NextDelaySeconds(preset, random.NextDouble(), random.NextDouble());
+        }
+
+        // Lively remains one party-level clock. Party size changes that clock's bounded opportunity
+        // range; it never creates one timer per Sim.
+        internal static void LivelyPartyRange(int eligibleParty, out double min, out double max)
+        {
+            int count = Math.Max(1, Math.Min(5, eligibleParty));
+            if (count == 1) { min = 180.0; max = 360.0; }
+            else if (count == 2) { min = 120.0; max = 240.0; }
+            else if (count == 3) { min = 90.0; max = 180.0; }
+            else { min = 60.0; max = 150.0; }
+        }
+
+        internal static double NextDelaySeconds(SocialActivityPreset preset, int eligibleParty, Random random)
+        {
+            if (preset != SocialActivityPreset.Lively) return NextDelaySeconds(preset, random);
+            if (random == null) random = new Random();
+            double min, max;
+            LivelyPartyRange(eligibleParty, out min, out max);
+            return min + (random.NextDouble() * (max - min));
+        }
+
+        internal static double ThreadFollowUpSeconds(double roll)
+        {
+            return 8.0 + (Math.Max(0.0, Math.Min(1.0, roll)) * 22.0);
         }
 
         // Which weighted band (0-based) a given delay landed in, for diagnostics/tests only.

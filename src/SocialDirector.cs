@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text;
 
 namespace ErenshorDeepSims
 {
@@ -13,6 +14,7 @@ namespace ErenshorDeepSims
         private readonly Dictionary<string, int> _lastSimLevels = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private readonly SemanticEventDeduplicator _semanticEvents = new SemanticEventDeduplicator();
         private readonly CampmasterCompatibility _campmaster;
+        private readonly AutonomousSocialScheduler _socialScheduler = new AutonomousSocialScheduler();
         private readonly DeepSimsConfigEntry<bool> _verboseLogging;
         private HashSet<string> _lastNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private string _lastScene = string.Empty;
@@ -51,6 +53,27 @@ namespace ErenshorDeepSims
         private string _adaptiveSignature = string.Empty;
         private double _adaptiveScore;
         private string _adaptiveReason = "not evaluated";
+        private readonly RecentSocialChatBuffer _recentSocialChat = new RecentSocialChatBuffer();
+        private readonly UnansweredTurnTracker _unansweredTurns = new UnansweredTurnTracker();
+        private readonly SilenceFatigueTracker _silenceFatigue = new SilenceFatigueTracker();
+        private readonly List<AmbientSeedCandidate> _campActivitySeeds = new List<AmbientSeedCandidate>();
+        private SocialActivityState _activityState = SocialActivityState.Unknown;
+        private CampmasterSocialContext _campmasterSocialContext;
+        private DateTime _lastObservedChatUtc = DateTime.MinValue;
+        private DateTime _lastPartySpeechUtc = DateTime.MinValue;
+        private DateTime _lastPlayerSpeechUtc = DateTime.MinValue;
+        private DateTime _lastAutonomousSpeechUtc = DateTime.MinValue;
+        private bool _contextPulsePending;
+        private long _contextPulseOpportunityId;
+        private string _activitySource = "unknown";
+        private string _activityReason = "not_sampled";
+        private string _contextConsistency = "unknown";
+        private bool _campmasterStaleWarningLogged;
+        private DateTime _nextSchedulerHeartbeatUtc = DateTime.MinValue;
+        private DateTime _standaloneOutOfCombatSinceUtc = DateTime.MinValue;
+        private double _standaloneStationarySeconds;
+        private double _standaloneOutOfCombatSeconds;
+        private string _standaloneScene = string.Empty;
 
         internal SocialDirector(DeepSimsPlugin plugin, IDeepSimsLog log)
         {
@@ -86,6 +109,7 @@ namespace ErenshorDeepSims
                 ", camp=" + (_campActive ? "active" : "inactive") +
                 ", camp-source=" + (_campmaster.Healthy ? "Campmaster" : "legacy") +
                 ", relax=" + (_relaxActive ? "active" : "inactive") +
+                ", activity-state=" + _activityState +
                 ", activity=" + DescribeActivityPreset() +
                 ", quiet=" + DescribeQuietTime();
         }
@@ -115,6 +139,28 @@ namespace ErenshorDeepSims
 
         internal string DescribeSeedsRecent() { return _seedDiagnostics.DescribeRecent(6); }
 
+        internal string DescribeSchedulerStatus()
+        {
+            DateTime now = DateTime.UtcNow;
+            int party = _plugin == null ? 0 : _plugin.GetActiveDeepSims().Count;
+            string campActivity = _campmasterSocialContext == null ? "unavailable" :
+                (string.IsNullOrWhiteSpace(_campmasterSocialContext.ActivityState) ? "unknown" : _campmasterSocialContext.ActivityState);
+            return "activity=" + _activityState + " source=" + _activitySource + " activityReason=" + _activityReason +
+                " contextConsistency=" + _contextConsistency +
+                " party=" + party + " stationary=" + Math.Round(CurrentStationarySeconds()) + "s outOfCombat=" +
+                Math.Round(CurrentOutOfCombatSeconds()) + "s sincePlayerSpeech=" + Math.Round(SecondsSince(_lastPlayerSpeechUtc, now)) +
+                "s sincePartySpeech=" + Math.Round(SecondsSince(_lastPartySpeechUtc, now)) + "s sinceAutonomousSpeech=" +
+                Math.Round(SecondsSince(_lastAutonomousSpeechUtc, now)) + "s meaningfulGameplayAge=" +
+                Math.Round(CurrentMeaningfulGameplayAge()) + "s\n[DeepSims Social] campmasterAvailable=" +
+                (_campmaster != null && _campmaster.Healthy ? "yes" : "no") + " campmasterRelax=" +
+                (_campmasterSocialContext != null && _campmasterSocialContext.AutoRelaxActive ? "yes" : "no") +
+                " campmasterActivity=" + campActivity + " " + _socialScheduler.DescribeStatus(now);
+        }
+
+        internal string DescribeSchedulerRecent() { return _socialScheduler.DescribeRecent(DateTime.UtcNow, 12); }
+
+        internal void OnPresetChanged() { _socialScheduler.RequestRefresh(); }
+
         internal void ClearTopicFatigue() { _topicFatigue.Clear(); _playerTopics.Clear(); _conversationMoments.Clear(); }
 
         private static List<string> NamesOf(IList<SimSnapshot> sims)
@@ -127,17 +173,19 @@ namespace ErenshorDeepSims
 
         // Called only once a generated or template line has actually been accepted for display. A
         // suppressed, rejected, or NO_MESSAGE opportunity must not consume the topic.
-        internal void NoteAmbientTopicEmitted(DirectorEvent evt, string speaker, string emittedText)
+        internal AutonomousAdvanceObservation NoteAmbientTopicEmitted(DirectorEvent evt, string speaker, string emittedText)
         {
-            if (evt == null || string.IsNullOrWhiteSpace(evt.TopicKey)) return;
+            AutonomousAdvanceObservation observation = new AutonomousAdvanceObservation();
+            if (evt == null || string.IsNullOrWhiteSpace(evt.TopicKey)) return observation;
             DateTime now = DateTime.UtcNow;
             long conversationId = _plugin == null ? 0 : _plugin.CurrentConversationId();
             _topicFatigue.NoteUsed(evt.TopicKey, evt.CooldownGroup, speaker, conversationId, now);
+            observation.TopicFatigueAdvanced = true;
 
             // What a Sim actually said becomes context for the next generation's callback pool, same
             // as a player line does below - never a verified fact, only something worth possibly
             // referencing ("you mentioned...") after real silence.
-            _conversationMoments.Note(evt.TopicKey, speaker, emittedText, now, ConversationMomentSource.SimSaid, conversationId);
+            observation.ConversationMomentAdded = _conversationMoments.Note(evt.TopicKey, speaker, emittedText, now, ConversationMomentSource.SimSaid, conversationId);
 
             // Safety net: if the emitted wording collapsed onto the generic waiting idea anyway, the
             // waiting subject is spent too, whatever subject was originally selected.
@@ -146,6 +194,8 @@ namespace ErenshorDeepSims
                 _topicFatigue.NoteUsed(collapsed, AmbientTopics.Idle.CooldownGroup, speaker, conversationId, now);
 
             _seedDiagnostics.NoteEmitted(evt.OpportunityId, speaker);
+            observation.CallbackStateAdvanced = false;
+            return observation;
         }
 
         // A failed generation does not mean the topic became "used", but repeating the same
@@ -189,15 +239,27 @@ namespace ErenshorDeepSims
             DateTime now = DateTime.UtcNow;
             bool nowCombat = world.Outing != null && !string.IsNullOrWhiteSpace(world.Outing.Activity) && world.Outing.Activity.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0;
             _inOrRecentCombat = nowCombat;
+            if (nowCombat)
+            {
+                _silenceFatigue.Reset();
+                if (_plugin != null) _plugin.CloseSocialThread("combat");
+            }
             ObserveCampmaster(now, nowCombat);
             UpdateCampState(now, nowCombat);
-            UpdateSoftDowntime(now, active, nowCombat);
+            UpdateActivityContext(now, active, nowCombat);
             UpdateAdaptiveActivity(now, world, active);
+            string authorityReason = "plugin_unavailable";
+            bool authority = _plugin != null && _plugin.CanOwnAutonomousSocial(out authorityReason);
+            _socialScheduler.Observe(now, _plugin != null && _plugin.CharacterScopeReady,
+                active.Count, authority, authorityReason, _activityState, _activitySource,
+                CurrentSocialPreset(), world.Scene, _plugin.HasActiveSocialThread(now), _random.NextDouble());
+            LogSchedulerHeartbeat(now, active.Count, authority, authorityReason);
             // SessionTelemetry emits the completed encounter only after both combat signals have
             // stayed quiet. Do not infer a conversation candidate from this coarse activity flip.
 
             if (active.Count == 0)
             {
+                _silenceFatigue.Reset();
                 _observedEmptyParty = true;
                 _initialized = false;
                 _lastNames.Clear();
@@ -219,6 +281,7 @@ namespace ErenshorDeepSims
             if (!string.IsNullOrWhiteSpace(scene) && !string.Equals(scene, _lastScene, StringComparison.OrdinalIgnoreCase))
             {
                 _lastScene = scene;
+                _silenceFatigue.Reset();
                 NoteSocialActivity(now);
             }
 
@@ -250,6 +313,7 @@ namespace ErenshorDeepSims
             }
             if (!_lastNames.SetEquals(names))
             {
+                _silenceFatigue.Reset();
                 // Erenshor does a noticeable amount of work while Sim party members spawn and
                 // initialize. Do not pile autonomous chat/profile work onto that same burst.
                 _partySettlingUntilUtc = now.AddSeconds(6.0);
@@ -300,6 +364,7 @@ namespace ErenshorDeepSims
                     SubmitVerifiedCandidate(type, description, importance, baseChance, expeditionActive, null, null, SocialEventTrust.ObservedNow);
                 else _eventConversations.RejectObservedType(type, "not promoted: insufficient Expedition social significance");
                 NoteSocialActivity(now);
+                ResetStandaloneDowntime(now);
                 return;
             }
 
@@ -311,6 +376,23 @@ namespace ErenshorDeepSims
                 SubmitVerifiedCandidate(type, description, importance, baseChance, active, ExtractLeadingSimName(type, description, active), null, SocialEventTrust.ObservedNow);
             else _eventConversations.RejectObservedType(type, "not promoted: insufficient event-conversation significance");
             NoteSocialActivity(now);
+            ResetStandaloneDowntime(now);
+        }
+
+        internal void NoteCampActivitySeed(CampEventFact evt)
+        {
+            if (evt == null) return;
+            string type = (evt.Type ?? string.Empty).Trim().ToLowerInvariant();
+            if (type != "camp_activity_completed" && type != "camp_watch_event" && type != "camp_preparation_changed") return;
+            string fact = CampLivingEventSemantics.FactualSummary(evt);
+            if (string.IsNullOrWhiteSpace(fact)) return;
+            string[] eligible = string.IsNullOrWhiteSpace(evt.ParticipantName) ? null : new string[] { evt.ParticipantName };
+            DateTime now = DateTime.UtcNow;
+            double score = type == "camp_watch_event" ? 44.0 : type == "camp_activity_completed" ? 40.0 : 37.0;
+            _campActivitySeeds.Add(new AmbientSeedCandidate(type, "camp_activity",
+                "react briefly to this exact Campmaster activity, adding no cause, outcome, attacker, buff, or native gameplay effect",
+                score, fact, "Campmaster living event contract v1", 50, 0.0, now, now.AddSeconds(90.0), eligible));
+            while (_campActivitySeeds.Count > 8) _campActivitySeeds.RemoveAt(0);
         }
 
         internal void NotifyCompletedEncounter(EncounterSnapshot encounter, IList<string> participants, int primaryEnemyKills)
@@ -339,16 +421,24 @@ namespace ErenshorDeepSims
 
         internal void NotePlayerConversation()
         {
+            _silenceFatigue.Reset();
             _eventConversations.NotePlayerConversation();
             DateTime receivedUtc = DateTime.UtcNow;
             _lastPlayerConversationUtc = receivedUtc;
+            _lastPlayerSpeechUtc = receivedUtc;
+            _contextPulsePending = false;
+            _contextPulseOpportunityId = 0;
+            _socialScheduler.RequestRefresh();
+            ResetStandaloneDowntime(receivedUtc);
             NoteSocialActivity(receivedUtc);
         }
 
         internal void NotePartyChatActivity()
         {
+            _lastPartySpeechUtc = DateTime.UtcNow;
             if (_plugin != null) _plugin.NoteSocialConversationActivity();
             NoteSocialActivity(DateTime.UtcNow);
+            _socialScheduler.RequestRefresh();
         }
 
         internal void HandleVanillaPartyLine(string speaker, string message)
@@ -395,6 +485,10 @@ namespace ErenshorDeepSims
             // Recording the topic is independent of whether a reply gets queued below: a later quiet
             // moment may still pick this subject back up. Scope is fixed to who was present now.
             DateTime playerNow = DateTime.UtcNow;
+            _unansweredTurns.NotePlayer(message, playerNow);
+            _lastPartySpeechUtc = playerNow;
+            _recentSocialChat.ObserveVisible("You tell the group: " + message, playerNow);
+            _lastObservedChatUtc = playerNow;
             if (_plugin.DirectorEnabledConfig.Value) _playerTopics.NotePartyMessage(message, NamesOf(active), playerNow);
 
             // Player input strongly refreshes the social situation: it becomes a callback candidate in
@@ -426,6 +520,39 @@ namespace ErenshorDeepSims
             bool allowFollowUp = !trivial && active.Count > 1;
             bool guaranteeResponse = true;
             _plugin.QueuePartyChatResponse(message, preferred, allowFollowUp, guaranteeResponse);
+        }
+
+        internal void ObserveVisibleChat(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            DateTime now = DateTime.UtcNow;
+            _recentSocialChat.ObserveVisible(raw, now);
+            _lastObservedChatUtc = now;
+        }
+
+        internal void ObserveVisibleChat(string raw, RecentChatChannel channel)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return;
+            DateTime now = DateTime.UtcNow;
+            _recentSocialChat.ObserveVisible(raw, now, channel);
+            _lastObservedChatUtc = now;
+            if (channel == RecentChatChannel.Party) _lastPartySpeechUtc = now;
+        }
+
+        internal void NoteVisibleDeepSimLine(string speaker, string text)
+        {
+            _silenceFatigue.Reset();
+            DateTime now = DateTime.UtcNow;
+            _lastAutonomousSpeechUtc = now;
+            _lastPartySpeechUtc = now;
+            _recentSocialChat.ObserveVisible((speaker ?? "Sim") + " tells the group: " + (text ?? string.Empty), now);
+            _lastObservedChatUtc = now;
+            _unansweredTurns.NoteAcknowledgement(now);
+            if (_contextPulseOpportunityId > 0)
+            {
+                _socialScheduler.NoteTerminal(_contextPulseOpportunityId, "visible", "emitted", true, true);
+                _contextPulseOpportunityId = 0;
+            }
         }
 
         internal void ForceTalk(string requestedSpeaker)
@@ -524,6 +651,7 @@ namespace ErenshorDeepSims
 
         private void Prime(WorldSnapshot world, IList<SimSnapshot> active, DateTime now)
         {
+            _silenceFatigue.Reset();
             bool arrivedAfterObservedEmpty = _observedEmptyParty;
             _observedEmptyParty = false;
             _initialized = true;
@@ -574,14 +702,9 @@ namespace ErenshorDeepSims
         private void EvaluateIdlePressure(DateTime now, WorldSnapshot world, IList<SimSnapshot> active)
         {
             if (!_plugin.DirectorEnabledConfig.Value || !_plugin.IdleChatterConfig.Value) return;
-            if (_relaxActive)
+            if (ContextPulsePolicy.IsEligibleActivity(_activityState))
             {
-                EvaluateRelaxPressure(now, world);
-                return;
-            }
-            if (_softDowntimeActive)
-            {
-                EvaluateSoftDowntimePressure(now, world, active);
+                EvaluateContextPulsePressure(now, world, active);
                 return;
             }
             if (_plugin.SeedingEnabledConfig != null && !_plugin.SeedingEnabledConfig.Value) return;
@@ -650,7 +773,7 @@ namespace ErenshorDeepSims
 
             _seedDiagnostics.NoteOutcome(decision.OpportunityId, "queued");
             LogSocialOpportunityDiagnostic(decision, quiet, now);
-            _plugin.QueueAutonomousReaction(ambient, decision.SelectedSpeaker, _campActive, false);
+            _plugin.QueueAutonomousReaction(ambient, decision.SelectedSpeaker, true, false);
         }
 
         // opportunity id, mode, elapsed silence, selected source (callback/ambient/Relax/event),
@@ -674,6 +797,7 @@ namespace ErenshorDeepSims
                     break;
                 }
             }
+            if (!string.IsNullOrWhiteSpace(decision.SelectedSource)) source = decision.SelectedSource;
             VerboseDebug("social opportunity #" + decision.OpportunityId + " context=" + ContextMode +
                 " silence=" + Math.Round(silenceSeconds) + "s source=" + source +
                 " topic=" + decision.SelectedTopicKey + callbackAge +
@@ -681,7 +805,7 @@ namespace ErenshorDeepSims
         }
 
         private AmbientSeedDecision EvaluateSeeds(DateTime now, WorldSnapshot world,
-            IList<SimSnapshot> active, double pressure, bool forceSpeech)
+            IList<SimSnapshot> active, double pressure, bool forceSpeech, double additionalSilenceAdjustment = 0.0)
         {
             if (active == null || active.Count == 0) return null;
             long opportunityId = _seedDiagnostics.NextOpportunityId();
@@ -703,7 +827,17 @@ namespace ErenshorDeepSims
                 // authoritative current/max mana and Manage Roles assignment. AmbientSeedProducers
                 // .TryBuildLowResourceSeed already accepts such a reading; nothing supplies one yet.
             }
+            for (int ci = _campActivitySeeds.Count - 1; ci >= 0; ci--)
+            {
+                AmbientSeedCandidate campSeed = _campActivitySeeds[ci];
+                if (campSeed == null || campSeed.ExpiresUtc < now) _campActivitySeeds.RemoveAt(ci);
+                else if (mode == SocialContextMode.Camp || mode == SocialContextMode.Relax || mode == SocialContextMode.SoftDowntime)
+                    candidates.Add(campSeed);
+            }
             candidates.AddRange(_playerTopics.BuildCandidates(now));
+            AmbientSeedCandidate ambientChat = AmbientSeedProducers.BuildAmbientChatCandidate(
+                _recentSocialChat.Snapshot(now, 90.0), now);
+            if (ambientChat != null) candidates.Add(ambientChat);
 
             // Priority order step 4 (callback candidate): only offered once no current player turn or
             // active Sim-to-Sim thread already owns this moment (SocialBudget's conversation-thread
@@ -713,6 +847,7 @@ namespace ErenshorDeepSims
             if (_conversationMoments.TryPickCallback(now, null, out callback))
                 candidates.Add(BuildCallbackCandidate(callback, now));
 
+            string seedContext = BuildSeedContext(world, _playerTopics.BuildRelevanceContext(now));
             List<SimSnapshot> eligible = new List<SimSnapshot>();
             Dictionary<string, double> familiarityBySpeaker = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < active.Count; i++)
@@ -726,7 +861,13 @@ namespace ErenshorDeepSims
                 // Each Sim's own remembered outings/important memories are eligible only to that Sim
                 // (see MemoryStore/8.3): a plain remembered string cannot prove who else witnessed it.
                 SimMemory memory = _plugin.LoadMemoryForSeeding(sim);
-                if (memory != null) candidates.AddRange(AmbientSeedProducers.BuildSharedMemoryCandidates(sim, memory, opportunityId, now));
+                if (memory != null)
+                {
+                    candidates.AddRange(AmbientSeedProducers.BuildSharedMemoryCandidates(sim, memory, opportunityId, now, seedContext));
+                    candidates.AddRange(AmbientSeedProducers.BuildIdentityCandidates(sim, memory, seedContext, SocialPerspectiveState.RoleplayActive, now));
+                    AmbientSeedCandidate recentLife = AmbientSeedProducers.BuildRecentLifeCandidate(sim, memory, now);
+                    if (recentLife != null) candidates.Add(recentLife);
+                }
             }
 
             double silenceNormal = _plugin.SeedSilenceNormalConfig == null
@@ -737,14 +878,110 @@ namespace ErenshorDeepSims
                 ? AmbientSeedSelector.DefaultSilenceRelax : _plugin.SeedSilenceRelaxConfig.Value;
             // Quiet/Normal/Lively keeps its meaning by moving the silence threshold rather than by
             // adding a second cadence system.
-            double silenceAdjust = (1.0 - _plugin.GetSocialOpportunityMultiplier()) * 12.0;
+            double silenceAdjust = ((1.0 - _plugin.GetSocialOpportunityMultiplier()) * 12.0) + additionalSilenceAdjustment;
 
+            bool livelyFullPartyPreference = active.Count >= 3 && active.Count <= 5 &&
+                CurrentSocialPreset() == SocialActivityPreset.Lively && !_inOrRecentCombat &&
+                (_activityState == SocialActivityState.SocialDowntime ||
+                 _activityState == SocialActivityState.ExtendedDowntime);
             AmbientSeedDecision decision = AmbientSeedSelector.Select(opportunityId, mode, candidates,
                 eligible, _topicFatigue, _plugin.CurrentConversationId(), now,
                 silenceNormal, silenceCamp, silenceRelax, pressure, silenceAdjust, forceSpeech,
-                _plugin.SeedDiagnosticsConfig == null || _plugin.SeedDiagnosticsConfig.Value, familiarityBySpeaker);
+                _plugin.SeedDiagnosticsConfig == null || _plugin.SeedDiagnosticsConfig.Value, familiarityBySpeaker,
+                livelyFullPartyPreference ? 1.0 : 0.0);
             _seedDiagnostics.Record(decision);
+            if (decision != null && !decision.SilenceWon &&
+                decision.SelectedTopicKey.StartsWith("recent_life:", StringComparison.OrdinalIgnoreCase))
+            {
+                RecentLifeDiagnosticCounters.SelectedAsSeed();
+                if (_log != null) _log.LogInfo("[DeepSims][RecentLife] " + RecentLifeDiagnosticCounters.Describe());
+            }
+            if (_log != null && decision != null)
+            {
+                _log.LogDebug("[DeepSims][SocialSeed] candidates=" + DescribeSeedCandidateSources(decision) +
+                    " selected=" + SeedSourceToken(decision) + " result=" + (decision.SilenceWon ? "skipped" : "selected"));
+                _log.LogInfo("[DeepSims][CognitionCorrelation] phase=seed opportunityId=" + decision.OpportunityId +
+                    " seedSource=" + CognitionObservability.BoundedToken(decision.SelectedSource) +
+                    " seedTopicKey=" + CognitionObservability.BoundedToken(decision.SelectedTopicKey) +
+                    " candidateSelected=" + !decision.SilenceWon + " candidateSuppressed=" + decision.SilenceWon +
+                    " suppressionReason=" + CognitionObservability.BoundedToken(decision.Reason));
+            }
             return decision;
+        }
+
+        private static string SeedSourceToken(AmbientSeedDecision decision)
+        {
+            if (decision == null || decision.SilenceWon) return "none";
+            return SeedSourceToken(decision.SelectedTopicKey, decision.SelectedSource);
+        }
+
+        private static string SeedSourceToken(string topicValue, string sourceValue)
+        {
+            string source = (sourceValue ?? string.Empty).ToLowerInvariant();
+            string topic = (topicValue ?? string.Empty).ToLowerInvariant();
+            if (topic.StartsWith("free_social_question")) return "free_social_question";
+            if (topic.StartsWith("free_social_hypothetical")) return "free_social_hypothetical";
+            if (topic.StartsWith("free_social_impulse")) return "free_social_impulse";
+            if (topic.StartsWith("recent_life:") || source.IndexOf("recent life") >= 0) return "recent_life";
+            if (topic.StartsWith("ambient_chat:") || source.IndexOf("ambient chat") >= 0) return "ambient";
+            if (topic.StartsWith("identity:") || source.IndexOf("identity") >= 0) return "interest";
+            if (topic.StartsWith("callback_")) return "callback";
+            if (topic.StartsWith("camp_") || source.IndexOf("campmaster") >= 0) return "camp";
+            if (source.IndexOf("news") >= 0) return "current_events";
+            if (topic == "ordinary_downtime" || topic == AmbientTopics.IdleWaiting) return "generic_fallback";
+            if (topic.StartsWith("memory:") || source.IndexOf("memory") >= 0) return "memory";
+            if (topic.StartsWith("session:") || source.IndexOf("session") >= 0) return "verified_event";
+            return "downtime_preference";
+        }
+
+        private static string DescribeSeedCandidateSources(AmbientSeedDecision decision)
+        {
+            if (decision == null || decision.Candidates == null || decision.Candidates.Count == 0) return "none";
+            Dictionary<string, int> counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < decision.Candidates.Count; i++)
+            {
+                AmbientSeedScore candidate = decision.Candidates[i];
+                if (candidate == null || candidate.Excluded) continue;
+                string source = SeedSourceToken(candidate.TopicKey, candidate.Source);
+                int count; counts.TryGetValue(source, out count); counts[source] = count + 1;
+            }
+            if (counts.Count == 0) return "none";
+            List<string> keys = new List<string>(counts.Keys); keys.Sort(StringComparer.Ordinal);
+            StringBuilder result = new StringBuilder();
+            for (int i = 0; i < keys.Count && i < 8; i++)
+            {
+                if (result.Length > 0) result.Append(',');
+                result.Append(keys[i]).Append(':').Append(counts[keys[i]]);
+            }
+            return result.ToString();
+        }
+
+        private static string BuildSeedContext(WorldSnapshot world, string recentPlayerTopicContext)
+        {
+            StringBuilder sb = new StringBuilder();
+            if (world == null)
+            {
+                if (!string.IsNullOrWhiteSpace(recentPlayerTopicContext)) sb.Append(recentPlayerTopicContext);
+                return sb.ToString().Trim();
+            }
+            if (!string.IsNullOrWhiteSpace(world.Scene)) sb.Append(world.Scene).Append(' ');
+            if (world.Outing != null)
+            {
+                if (!string.IsNullOrWhiteSpace(world.Outing.CurrentZone)) sb.Append(world.Outing.CurrentZone).Append(' ');
+                if (!string.IsNullOrWhiteSpace(world.Outing.Activity)) sb.Append(world.Outing.Activity).Append(' ');
+                if (!string.IsNullOrWhiteSpace(world.Outing.CurrentCombatTarget)) sb.Append(world.Outing.CurrentCombatTarget).Append(' ');
+                if (!string.IsNullOrWhiteSpace(world.Outing.CurrentEncounter)) sb.Append(world.Outing.CurrentEncounter).Append(' ');
+                if (!string.IsNullOrWhiteSpace(world.Outing.LastEncounter)) sb.Append(world.Outing.LastEncounter).Append(' ');
+                if (world.Outing.Facts != null)
+                {
+                    int start = Math.Max(0, world.Outing.Facts.Count - 4);
+                    for (int i = start; i < world.Outing.Facts.Count; i++)
+                        if (!string.IsNullOrWhiteSpace(world.Outing.Facts[i])) sb.Append(world.Outing.Facts[i]).Append(' ');
+                }
+            }
+            if (!string.IsNullOrWhiteSpace(recentPlayerTopicContext))
+                sb.Append(recentPlayerTopicContext).Append(' ');
+            return sb.ToString().Trim();
         }
 
         private DirectorEvent BuildAmbientEvent(AmbientSeedDecision decision)
@@ -778,42 +1015,137 @@ namespace ErenshorDeepSims
         // topic fatigue -> silence -> SocialBudget -> conversation thread pipeline as Normal/Camp
         // ambient chatter (AmbientSeedSelector, shared TopicFatigueTracker, /dsseeds diagnostics).
         // Only cadence (min/max delay) and the eventual prompt wording stay Relax-specific.
-        private void EvaluateRelaxPressure(DateTime now, WorldSnapshot world)
+        private void EvaluateContextPulsePressure(DateTime now, WorldSnapshot world, IList<SimSnapshot> active)
         {
-            if (now < _nextIdleEvaluationUtc) return;
+            long opportunityId;
+            if (!_socialScheduler.TryTakeDue(now, active == null ? 0 : active.Count, _activityState,
+                CurrentSocialPreset(), _activitySource, _random.NextDouble(), out opportunityId)) return;
             if (!CanAutonomouslySpeak(now, false))
             {
-                _nextIdleEvaluationUtc = now.AddSeconds(12.0);
+                LogOpportunityTerminal(0, "blocked", "local_autonomous_gate", null);
+                _socialScheduler.NoteTerminal(opportunityId, "blocked", "local_autonomous_gate", false, false);
                 return;
             }
 
-            List<SimSnapshot> active = _plugin.GetActiveDeepSims();
-            AmbientSeedDecision decision = EvaluateSeeds(now, world, active, 1.0, false);
-            _nextIdleEvaluationUtc = now.AddSeconds(NextRelaxDelay(CurrentSocialPreset()));
+            SocialSituationSnapshot situation = BuildSocialSituation(now, world, active);
+            string capacityReason;
+            if (!_plugin.CanAssessContextPulse(_inOrRecentCombat, out capacityReason))
+            {
+                LogOpportunityTerminal(0, "blocked", capacityReason, null);
+                _socialScheduler.NoteTerminal(opportunityId, "blocked", capacityReason, false, false);
+                return;
+            }
+            if (_contextPulsePending)
+            {
+                LogOpportunityTerminal(0, "blocked", "context_pulse_pending", null);
+                _socialScheduler.NoteTerminal(opportunityId, "blocked", "context_pulse_pending", false, false);
+                return;
+            }
+            _contextPulseOpportunityId = opportunityId;
+            _contextPulsePending = _plugin.QueueContextPulse(situation, delegate
+            {
+                _socialScheduler.NoteInferenceStarted(opportunityId, DateTime.UtcNow);
+                if (_log != null) _log.LogInfo("[DeepSims][ContextPulse] opportunity=" + opportunityId + " context_inference_started");
+            }, delegate(ContextPulseDecision pulse)
+            {
+                _contextPulsePending = false;
+                ApplyContextPulseDecision(opportunityId, pulse, situation, world, active);
+            });
+            if (!_contextPulsePending)
+            {
+                LogOpportunityTerminal(0, "blocked", "pulse_queue_unavailable", null);
+                _socialScheduler.NoteTerminal(opportunityId, "blocked", "pulse_queue_unavailable", false, false);
+            }
+        }
+
+        private void ApplyContextPulseDecision(long opportunityId, ContextPulseDecision pulse, SocialSituationSnapshot situation,
+            WorldSnapshot world, IList<SimSnapshot> active)
+        {
+            DateTime now = DateTime.UtcNow;
+            if (pulse != null && pulse.Cancelled)
+            {
+                LogOpportunityTerminal(opportunityId, "failed", pulse.TerminalReason, null);
+                _socialScheduler.NoteTerminal(opportunityId, pulse.TerminalReason == "stale" ? "stale" : "failed",
+                    pulse.TerminalReason, true, false);
+                _contextPulseOpportunityId = 0;
+                return;
+            }
+            if (_inOrRecentCombat || situation == null || !ContextPulsePolicy.IsEligibleActivity(_activityState) ||
+                _activityState != situation.ActivityState)
+            {
+                LogOpportunityTerminal(0, "stale", "activity_changed", null);
+                _socialScheduler.NoteTerminal(opportunityId, "stale", "activity_changed", true, false);
+                _contextPulseOpportunityId = 0;
+                return;
+            }
+            if (pulse == null)
+            {
+                LogOpportunityTerminal(0, "llm_rejected", "invalid_structured_pulse", null);
+                _socialScheduler.NoteTerminal(opportunityId, "failed", "invalid_structured_pulse", true, false);
+                _contextPulseOpportunityId = 0;
+                return;
+            }
+            if (!pulse.SpeakNow)
+            {
+                bool fatigueEligible = active != null && active.Count >= 3 && active.Count <= 5 &&
+                    CurrentSocialPreset() == SocialActivityPreset.Lively && !_inOrRecentCombat &&
+                    (_activityState == SocialActivityState.SocialDowntime ||
+                     _activityState == SocialActivityState.ExtendedDowntime);
+                SilenceFatiguePressure fatiguePressure = _silenceFatigue.NoteSilence(fatigueEligible);
+                if (_log != null) _log.LogInfo("[DeepSims][SilenceFatigue] decision=silence consecutiveSilence=" +
+                    _silenceFatigue.Consecutive + " pressure=" + fatiguePressure + " seedSource=pending");
+                if (fatiguePressure == SilenceFatiguePressure.Normal)
+                {
+                    _plugin.TryQueueOrganicCurrentEvent(situation);
+                    LogOpportunityTerminal(0, "context_chose_silence", pulse.ReasonCategory, null);
+                    _socialScheduler.NoteTerminal(opportunityId, "silence", pulse.ReasonCategory, true, false);
+                    _contextPulseOpportunityId = 0;
+                    return;
+                }
+            }
+
+            bool forceSafeSeed = !pulse.SpeakNow && _silenceFatigue.Consecutive >= 3;
+            double fatigueAdjust = !pulse.SpeakNow ? _silenceFatigue.SilenceAdjustment : 0.0;
+            AmbientSeedDecision decision = EvaluateSeeds(now, world, active, 1.0, forceSafeSeed, fatigueAdjust);
             if (decision == null || decision.SilenceWon)
             {
-                if (decision != null) VerboseDebug("Relax opportunity #" + decision.OpportunityId +
-                    " chose silence: " + decision.Reason);
+                _plugin.TryQueueOrganicCurrentEvent(situation);
+                LogOpportunityTerminal(decision == null ? 0 : decision.OpportunityId, "no_topic", "seed_selector", null);
+                _socialScheduler.NoteTerminal(opportunityId, "no_topic", "seed_selector", true, false);
+                _contextPulseOpportunityId = 0;
                 return;
             }
-
-            string type = "relax_topic_" + decision.SelectedTopicKey;
-            string semantic = "relax|" + _relaxSessionOrdinal.ToString() + "|" + decision.SelectedTopicKey;
-            string socialReason;
-            if (!_plugin.TryAdmitAutonomousOpportunity(type, SocialPriority.Low, semantic, _inOrRecentCombat, out socialReason))
+            if (_log != null) _log.LogInfo("[DeepSims][SilenceFatigue] decision=speak consecutiveSilence=" +
+                _silenceFatigue.Consecutive + " pressure=" + (forceSafeSeed ? "ForceSafeSeed" : "seed_selected") +
+                " seedSource=" + SeedSourceToken(decision));
+            string type = "context_pulse_" + decision.SelectedTopicKey;
+            string semantic = "context-pulse|" + _relaxSessionOrdinal.ToString() + "|" + decision.SelectedTopicKey;
+            string reason;
+            if (!_plugin.TryAdmitAutonomousOpportunity(type, SocialPriority.Low, semantic, _inOrRecentCombat, out reason))
             {
-                _seedDiagnostics.NoteOutcome(decision.OpportunityId, "social budget suppressed: " + socialReason);
-                VerboseDebug("Relax chatter suppressed: topic=" + decision.SelectedTopicKey + ", reason=" + socialReason);
+                _seedDiagnostics.NoteOutcome(decision.OpportunityId, "social budget suppressed: " + reason);
+                LogOpportunityTerminal(decision.OpportunityId, "blocked", reason, decision.SelectedSpeaker);
+                _socialScheduler.NoteTerminal(opportunityId, "blocked", reason, true, false);
+                _contextPulseOpportunityId = 0;
                 return;
             }
-
+            DirectorEvent evt = BuildRelaxEvent(decision, type, world);
+            if (!string.IsNullOrWhiteSpace(pulse.CurrentTopic))
+                evt.PromptHint = (evt.PromptHint ?? string.Empty) + " The current conversation assessment favors: " + pulse.CurrentTopic + ".";
             _seedDiagnostics.NoteOutcome(decision.OpportunityId, "queued");
             LogSocialOpportunityDiagnostic(decision, (now - _lastSocialUtc).TotalSeconds, now);
-            DirectorEvent evt = BuildRelaxEvent(decision, type, world);
-            // A Relax opportunity is a small conversation opportunity rather than an orphaned status
-            // line. Existing Deep Sims thread caps, speaker cooldowns, grounding, and central output
-            // budget remain authoritative.
             _plugin.QueueAutonomousReaction(evt, decision.SelectedSpeaker, true, false);
+            _socialScheduler.NoteTerminal(opportunityId, "speak", "queued_normal_path", true, false);
+        }
+
+        private void LogOpportunityTerminal(long id, string result, string reason, string speaker)
+        {
+            if (_log == null) return;
+            _log.LogDebug("[DeepSims][SocialOpportunity] id=" + id + " activity=" + _activityState +
+                " preset=" + CurrentSocialPreset() + " party=" + (_plugin == null ? 0 : _plugin.GetActiveDeepSims().Count) +
+                " source=context_pulse result=" + (result ?? "unknown") + " reason=" +
+                (string.IsNullOrWhiteSpace(reason) ? "none" : reason.Replace(' ', '_')) +
+                (string.IsNullOrWhiteSpace(speaker) ? string.Empty : " speaker=" + speaker));
         }
 
         private void EvaluateSoftDowntimePressure(DateTime now, WorldSnapshot world, IList<SimSnapshot> active)
@@ -900,6 +1232,14 @@ namespace ErenshorDeepSims
 
         private double NextRelaxDelay(SocialActivityPreset preset)
         {
+            int partyCount = _plugin == null ? 0 : _plugin.GetActiveDeepSims().Count;
+            if (preset == SocialActivityPreset.Lively)
+            {
+                double livelyMin, livelyMax;
+                AmbientCadence.LivelyPartyRange(partyCount, out livelyMin, out livelyMax);
+                if (partyCount >= 3) { livelyMin *= 0.85; livelyMax *= 0.85; }
+                return livelyMin + (_random.NextDouble() * (livelyMax - livelyMin));
+            }
             double min = RelaxSocialPolicy.MinimumSeconds(preset);
             double max = Math.Max(min, RelaxSocialPolicy.MaximumSeconds(preset));
             return min + (_random.NextDouble() * (max - min));
@@ -934,7 +1274,8 @@ namespace ErenshorDeepSims
                 int count = Math.Min(4, items.Count);
                 int start = items.Count - count;
                 string value = items[start + (int)(Math.Abs(opportunityId + i) % count)];
-                if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+                if (!string.IsNullOrWhiteSpace(value))
+                    return items == memory.OutingSummaries ? VerifiedOutingHistoryPolicy.SanitizeForPrompt(value) : value.Trim();
             }
             return string.Empty;
         }
@@ -1012,10 +1353,13 @@ namespace ErenshorDeepSims
             {
                 // Variable, weighted-band delay instead of one fixed cooldown: this only decides WHEN
                 // the party gets another chance to consider something social, not that it must speak.
-                delay = Math.Max(NormalIdleMinimum(),
-                    AmbientCadence.NextDelaySeconds(CurrentSocialPreset(), _random));
+                delay = Math.Max(NormalIdleMinimum(), AmbientCadence.NextDelaySeconds(CurrentSocialPreset(),
+                    _plugin == null ? 0 : _plugin.GetActiveDeepSims().Count, _random));
             }
             _nextIdleEvaluationUtc = now.AddSeconds(delay);
+            if (_log != null && CurrentSocialPreset() == SocialActivityPreset.Lively)
+                _log.LogDebug("[DeepSims][SocialPacing] preset=Lively eligibleParty=" +
+                    (_plugin == null ? 0 : _plugin.GetActiveDeepSims().Count) + " state=idle nextOpportunitySeconds=" + Math.Round(delay));
         }
 
         private void ObserveCampmaster(DateTime now, bool inCombat)
@@ -1164,6 +1508,120 @@ namespace ErenshorDeepSims
                 MaybeReact("camp_start", campStart.Description, 0.85, null, false);
         }
 
+        private void UpdateActivityContext(DateTime now, IList<SimSnapshot> active, bool inCombat)
+        {
+            _campmasterSocialContext = _campmaster == null ? null : _campmaster.ReadSocialContext();
+            if (_campmasterSocialContext != null && !string.IsNullOrWhiteSpace(_campmasterSocialContext.ActivityState))
+            {
+                SocialActivityState prior = _activityState;
+                SocialActivityState parsed = ParseActivityState(_campmasterSocialContext.ActivityState);
+                if (parsed == SocialActivityState.Unknown)
+                {
+                    _activityReason = "campmaster_unknown_fallback";
+                    _contextConsistency = "fallback";
+                    UpdateStandaloneActivity(now, active, inCombat);
+                    return;
+                }
+                if (CampmasterContextConsistencyPolicy.IsStale(parsed, _campmasterSocialContext.ActivityReason,
+                    _campmasterSocialContext.SecondsStationary, _campmasterSocialContext.SecondsOutOfCombat,
+                    _campmasterSocialContext.SecondsSinceMeaningfulGameplay))
+                {
+                    if (!_campmasterStaleWarningLogged && _log != null)
+                    {
+                        _campmasterStaleWarningLogged = true;
+                        _log.LogWarning("[DeepSims][SocialScheduler] Campmaster activity snapshot was internally stale; using standalone downtime fallback.");
+                    }
+                    UpdateStandaloneActivity(now, active, inCombat);
+                    if (!inCombat && active != null && active.Count > 0 &&
+                        _campmasterSocialContext.SecondsStationary >= 60.0 &&
+                        _campmasterSocialContext.SecondsOutOfCombat >= 60.0)
+                    {
+                        _softDowntimeActive = true;
+                        _standaloneStationarySeconds = _campmasterSocialContext.SecondsStationary;
+                        _standaloneOutOfCombatSeconds = _campmasterSocialContext.SecondsOutOfCombat;
+                        _activityState = SocialActivityState.SocialDowntime;
+                    }
+                    _activitySource = "standalone";
+                    _activityReason = "stale_campmaster_" + SafeToken(_campmasterSocialContext.ActivityReason);
+                    _contextConsistency = "fallback";
+                    return;
+                }
+                _activityState = parsed;
+                _activitySource = "campmaster";
+                _activityReason = string.IsNullOrWhiteSpace(_campmasterSocialContext.ActivityReason)
+                    ? "campmaster_activity" : SafeToken(_campmasterSocialContext.ActivityReason);
+                _contextConsistency = "fresh";
+                _campmasterStaleWarningLogged = false;
+                if (_activityState != SocialActivityState.SocialDowntime && _activityState != SocialActivityState.ExtendedDowntime)
+                    _contextPulsePending = false;
+                _softDowntimeActive = false;
+                _softDowntimeSinceUtc = DateTime.MinValue;
+                _softDowntimeHasAnchor = false;
+                _standaloneStationarySeconds = 0;
+                _standaloneOutOfCombatSeconds = 0;
+                _standaloneOutOfCombatSinceUtc = DateTime.MinValue;
+                if (prior != _activityState)
+                    VerboseDebug("[DeepSims][Activity] " + prior + " -> " + _activityState +
+                        " stationary=" + Math.Round(_campmasterSocialContext.SecondsStationary) + "s outOfCombat=" +
+                        Math.Round(_campmasterSocialContext.SecondsOutOfCombat) + "s");
+                return;
+            }
+
+            // Campmaster is optional. Without its additive activity contract, preserve the existing
+            // local soft-downtime behavior as a fail-soft pacing fallback, never as competing camp truth.
+            UpdateStandaloneActivity(now, active, inCombat);
+        }
+
+        private void UpdateStandaloneActivity(DateTime now, IList<SimSnapshot> active, bool inCombat)
+        {
+            UpdateSoftDowntime(now, active, inCombat);
+            _activitySource = "standalone";
+            _activityState = inCombat ? SocialActivityState.Combat :
+                _softDowntimeActive ? SocialActivityState.SocialDowntime : SocialActivityState.ActiveGameplay;
+            _activityReason = inCombat ? "combat_or_grace" : _softDowntimeActive ? "stationary_safe_threshold_met" : "downtime_threshold_not_met";
+            _contextConsistency = "fallback";
+        }
+
+        private static SocialActivityState ParseActivityState(string value)
+        {
+            SocialActivityState parsed;
+            return Enum.TryParse<SocialActivityState>(value ?? string.Empty, true, out parsed) ? parsed : SocialActivityState.Unknown;
+        }
+
+        private SocialSituationSnapshot BuildSocialSituation(DateTime now, WorldSnapshot world, IList<SimSnapshot> active)
+        {
+            SocialSituationSnapshot value = new SocialSituationSnapshot();
+            value.ActivityState = _activityState;
+            value.Scene = world == null ? string.Empty : world.Scene;
+            value.EligiblePartyCount = active == null ? 0 : active.Count;
+            for (int i = 0; active != null && i < active.Count; i++)
+                if (active[i] != null && !string.IsNullOrWhiteSpace(active[i].Name)) value.EligiblePartyMembers.Add(active[i].Name);
+            value.SecondsStationary = CurrentStationarySeconds();
+            value.SecondsOutOfCombat = CurrentOutOfCombatSeconds();
+            value.SecondsSinceMeaningfulGameplay = _campmasterSocialContext == null ? 0 : _campmasterSocialContext.SecondsSinceMeaningfulGameplay;
+            value.SecondsSincePlayerSpeech = SecondsSince(_lastPlayerSpeechUtc, now);
+            value.SecondsSincePartySpeech = SecondsSince(_lastPartySpeechUtc, now);
+            value.SecondsSinceAnyObservedChat = SecondsSince(_lastObservedChatUtc, now);
+            value.SecondsSinceAutonomousSpeech = SecondsSince(_lastAutonomousSpeechUtc, now);
+            value.CurrentThread = _plugin == null ? string.Empty : _plugin.CurrentSocialThreadDescription();
+            value.RecentChat = _recentSocialChat.Snapshot(now, 900.0);
+            if (value.RecentChat.Count > 0) value.LastVisibleSpeaker = value.RecentChat[value.RecentChat.Count - 1].Speaker;
+            value.CurrentCampmasterState = _campmasterSocialContext == null ? "unavailable" :
+                (_campmasterSocialContext.Mode ?? "None") + "/" + (_campmasterSocialContext.Recognition ?? "unknown");
+            value.SocialBudget = _plugin == null ? string.Empty : _plugin.DescribeSocialBudget();
+            value.PacingPreset = CurrentSocialPreset();
+            value.AutoRelax = _campmasterSocialContext != null && _campmasterSocialContext.AutoRelaxActive;
+            value.AutoCamp = false;
+            value.EphemeralSummary = _plugin == null ? string.Empty : _plugin.CurrentEphemeralSocialSummary();
+            value.Unanswered = _unansweredTurns.Current(now);
+            return value;
+        }
+
+        private static double SecondsSince(DateTime value, DateTime now)
+        {
+            return value == DateTime.MinValue ? 9999.0 : Math.Max(0.0, (now - value).TotalSeconds);
+        }
+
         private void UpdateSoftDowntime(DateTime now, IList<SimSnapshot> active, bool inCombat)
         {
             bool sitting = false;
@@ -1175,14 +1633,29 @@ namespace ErenshorDeepSims
             }
             catch { }
 
-            bool blocked = inCombat || _campActive || _campmasterActive || _manualCamp || _relaxActive || active == null || active.Count == 0;
+            bool blocked = _plugin == null || !_plugin.CharacterScopeReady || inCombat || active == null || active.Count == 0;
             if (player == null || blocked)
             {
                 if (_softDowntimeActive) VerboseDebug("soft downtime exited reason=" + (inCombat ? "combat" : "camp-or-party-state"));
                 _softDowntimeActive = false;
                 _softDowntimeSinceUtc = DateTime.MinValue;
                 _softDowntimeHasAnchor = false;
+                _standaloneStationarySeconds = 0;
+                _standaloneOutOfCombatSeconds = 0;
+                _standaloneOutOfCombatSinceUtc = DateTime.MinValue;
                 return;
+            }
+
+            if (_standaloneOutOfCombatSinceUtc == DateTime.MinValue) _standaloneOutOfCombatSinceUtc = now;
+            _standaloneOutOfCombatSeconds = Math.Max(0.0, (now - _standaloneOutOfCombatSinceUtc).TotalSeconds);
+            string scene = string.Empty;
+            try { scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? string.Empty; } catch { }
+            if (!string.Equals(scene, _standaloneScene, StringComparison.OrdinalIgnoreCase))
+            {
+                _standaloneScene = scene;
+                _softDowntimeHasAnchor = false;
+                _softDowntimeActive = false;
+                _standaloneStationarySeconds = 0;
             }
 
             UnityEngine.Vector3 position = player.transform.position;
@@ -1193,19 +1666,72 @@ namespace ErenshorDeepSims
                 _softDowntimeSinceUtc = now;
                 _softDowntimeAnchor = position;
                 _nextIdleEvaluationUtc = now.AddSeconds(25.0);
+                _standaloneStationarySeconds = 0;
                 return;
             }
-            double requiredSeconds = sitting ? 25.0 : 45.0;
+            _standaloneStationarySeconds = Math.Max(0.0, (now - _softDowntimeSinceUtc).TotalSeconds);
+            double requiredSeconds = 60.0;
             if (!_softDowntimeActive && (now - _softDowntimeSinceUtc).TotalSeconds >= requiredSeconds)
             {
                 _softDowntimeActive = true;
                 _lastSocialUtc = now;
-                // The party has already demonstrated a real quiet pause; open the first social
-                // evaluation soon, then let the normal 45-120s soft-downtime cadence take over.
+                // The party has already demonstrated a real quiet pause; the shared scheduler will
+                // re-arm at its faster standalone-downtime cadence.
                 _nextIdleEvaluationUtc = now.AddSeconds(15.0);
                 VerboseDebug("soft downtime active source=" + (sitting ? "sitting" : "same_area") +
                     " delay=" + requiredSeconds + "s");
             }
+        }
+
+        private double CurrentStationarySeconds()
+        {
+            return _campmasterSocialContext != null && _activitySource == "campmaster"
+                ? _campmasterSocialContext.SecondsStationary : _standaloneStationarySeconds;
+        }
+
+        private double CurrentOutOfCombatSeconds()
+        {
+            return _campmasterSocialContext != null && _activitySource == "campmaster"
+                ? _campmasterSocialContext.SecondsOutOfCombat : _standaloneOutOfCombatSeconds;
+        }
+
+        private double CurrentMeaningfulGameplayAge()
+        {
+            return _campmasterSocialContext == null ? 0.0 : _campmasterSocialContext.SecondsSinceMeaningfulGameplay;
+        }
+
+        private static string SafeToken(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value)) return "unknown";
+            StringBuilder sb = new StringBuilder();
+            string lower = value.Trim().ToLowerInvariant();
+            for (int i = 0; i < lower.Length && sb.Length < 48; i++)
+            {
+                char c = lower[i];
+                if (char.IsLetterOrDigit(c) || c == '_') sb.Append(c);
+                else if (sb.Length > 0 && sb[sb.Length - 1] != '_') sb.Append('_');
+            }
+            return sb.ToString().Trim('_');
+        }
+
+        private void ResetStandaloneDowntime(DateTime now)
+        {
+            _softDowntimeActive = false;
+            _softDowntimeSinceUtc = now;
+            _softDowntimeHasAnchor = false;
+            _standaloneStationarySeconds = 0;
+            _socialScheduler.RequestRefresh();
+        }
+
+        private void LogSchedulerHeartbeat(DateTime now, int partyCount, bool authority, string authorityReason)
+        {
+            if (_log == null || now < _nextSchedulerHeartbeatUtc || _plugin == null || !_plugin.CharacterScopeReady) return;
+            _nextSchedulerHeartbeatUtc = now.AddSeconds(30.0);
+            _log.LogInfo("[DeepSims][SocialScheduler] state=alive characterReady=True party=" + partyCount +
+                " authority=" + authority + " preset=" + CurrentSocialPreset() + " activity=" + _activityState +
+                " source=" + _activitySource + " activityReason=" + _activityReason +
+                " contextConsistency=" + _contextConsistency + " " + _socialScheduler.DescribeStatus(now) +
+                (authority || string.IsNullOrWhiteSpace(authorityReason) ? string.Empty : " authorityReason=" + authorityReason.Replace(' ', '_')));
         }
 
         private static string FindAddressedSim(string message, IList<SimSnapshot> active)
@@ -1298,12 +1824,24 @@ namespace ErenshorDeepSims
 
         private double NormalIdleMinimum()
         {
+            if (CurrentSocialPreset() == SocialActivityPreset.Lively)
+            {
+                double min, max;
+                AmbientCadence.LivelyPartyRange(_plugin == null ? 0 : _plugin.GetActiveDeepSims().Count, out min, out max);
+                return min;
+            }
             double configured = _plugin.IdleMinSecondsConfig == null ? 90.0 : _plugin.IdleMinSecondsConfig.Value;
             return Math.Max(30.0, SocialPolicy.ScaleAmbientSeconds(CurrentSocialPreset(), configured));
         }
 
         private double NormalIdleMaximum()
         {
+            if (CurrentSocialPreset() == SocialActivityPreset.Lively)
+            {
+                double min, max;
+                AmbientCadence.LivelyPartyRange(_plugin == null ? 0 : _plugin.GetActiveDeepSims().Count, out min, out max);
+                return max;
+            }
             double configured = _plugin.IdleMaxSecondsConfig == null ? 300.0 : _plugin.IdleMaxSecondsConfig.Value;
             return Math.Max(NormalIdleMinimum() + 1.0, SocialPolicy.ScaleAmbientSeconds(CurrentSocialPreset(), configured));
         }

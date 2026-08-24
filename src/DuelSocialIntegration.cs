@@ -52,6 +52,7 @@ namespace ErenshorDeepSims
         internal static void Handle(DeepSimsPlugin plugin, VerifiedDuelEvent value, string source)
         {
             if (plugin == null || value == null || !plugin.EnabledConfig.Value) return;
+            plugin.NotifyCompetitiveCombatSemantic("duel", value.Type, value.ReasonToken);
             lock (DedupLock)
             {
                 if (!Dedup.TryAccept(value, DateTime.UtcNow))
@@ -68,10 +69,28 @@ namespace ErenshorDeepSims
             List<SimSnapshot> active = plugin.GetActiveDeepSims();
             bool opponentDeep = DuelSocialPolicy.OpponentIsCurrentDeepSim(value, active);
 
+            // Contract v4 exposes DuelId/participants through PracticeDuelEvents.SemanticEvent. When
+            // that optional surface is bound, DuelV4SemanticBridge owns the correlated Living Social
+            // episode. Keep this legacy uncorrelated path only for older Duel builds / binding gaps.
+            if (!DuelV4SemanticBridge.IsBound)
+            {
+                List<string> socialParticipants = new List<string> { "player" };
+                if (!string.IsNullOrWhiteSpace(value.Opponent)) socialParticipants.Add(value.Opponent);
+                List<string> socialTags = new List<string> { "duel", "competitiveness" };
+                if (value.IsCompleted && value.Yielded == "opponent") socialTags.Add("duel_win");
+                if (value.IsCompleted && value.Yielded == "player") socialTags.Add("duel_loss");
+                string socialSummary = value.MemorySummary();
+                if (string.IsNullOrWhiteSpace(socialSummary))
+                    socialSummary = "A verified Practice Duel event occurred with " + (string.IsNullOrWhiteSpace(value.Opponent) ? "a nearby Sim" : value.Opponent) + ": " + value.Type + ".";
+                string socialEventId = SocialEpisodeLedger.StableId("duel|" + value.Fingerprint() + "|" + DateTime.UtcNow.Ticks.ToString());
+                plugin.RecordLivingSocialEpisode("duel", string.Empty, socialEventId, socialSummary, socialParticipants, string.Empty,
+                    DuelSocialPolicy.Importance(value), socialTags, 0f, value.IsHostileInterruption ? .45f : .15f, value.IsCompleted);
+            }
+
             // One compact verified social memory at terminal completion only.  RecordSharedEvent
             // writes only to current Deep Sims, so a nearby non-party opponent never gains a Deep
             // Sim identity or memory file just because Duel can target it.
-            if (DuelSocialPolicy.ShouldPersistMemory(value))
+            if (!DuelV4SemanticBridge.IsBound && DuelSocialPolicy.ShouldPersistMemory(value))
             {
                 string summary = value.MemorySummary();
                 if (!string.IsNullOrWhiteSpace(summary))

@@ -40,6 +40,13 @@ namespace ErenshorDeepSims
             DateTime now = DateTime.UtcNow;
             if (string.Equals(key, _lastKey, StringComparison.Ordinal) && (now - _lastUtc).TotalSeconds < 6.0) return;
             _lastKey = key; _lastUtc = now;
+            plugin.NotifyCompetitiveCombatSemantic("pvp", type, reason);
+            bool emitObservedEvent = true;
+            if (type == "pvp_match_completed")
+            {
+                string correlation;
+                emitObservedEvent = CompetitiveEventCorrelation.TryAcceptTerminal("pvp", id, name, scene, now, out correlation);
+            }
 
             string where = string.IsNullOrWhiteSpace(scene) ? string.Empty : " in " + scene;
             string who = string.IsNullOrWhiteSpace(name) ? "an off-map PvP party" : "the off-map PvP party led by " + name;
@@ -77,7 +84,19 @@ namespace ErenshorDeepSims
                 memory = decisive;
                 chance = decisive ? .85 : escaped ? .45 : verdict == "cancelled" ? .10 : 0.0;
             }
-            plugin.NotifyObservedGameEvent(type, description, importance, memory, chance);
+            List<string> socialParticipants = new List<string> { "player" };
+            List<SimSnapshot> currentDeep = plugin.GetActiveDeepSims();
+            for (int i = 0; i < currentDeep.Count; i++)
+                if (currentDeep[i] != null && !string.IsNullOrWhiteSpace(currentDeep[i].Name)) socialParticipants.Add(currentDeep[i].Name);
+            if (!string.IsNullOrWhiteSpace(name)) socialParticipants.Add(name);
+            List<string> socialTags = new List<string> { "pvp", "competitiveness" };
+            if (type == "pvp_ambush" || type == "pvp_match_completed") socialTags.Add("danger");
+            string socialEventId = id.Length > 0 ? "pvp-" + id : SocialEpisodeLedger.StableId(type + "|" + name + "|" + decisionValue + "|" + reason);
+            plugin.RecordLivingSocialEpisode("pvp", id, socialEventId, description, socialParticipants, scene, importance,
+                socialTags, 0f, type == "pvp_match_completed" ? .55f : .35f, importance >= 65);
+            // Cross-source terminal dedupe applies to the legacy/session-event stream only. The
+            // Living Social episode is still recorded so correlated Nemesis metadata can merge.
+            if (emitObservedEvent) plugin.NotifyObservedGameEvent(type, description, importance, memory, chance);
         }
 
 #if SHARED_CONTRACTS

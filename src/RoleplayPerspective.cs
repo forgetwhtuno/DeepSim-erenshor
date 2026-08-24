@@ -89,10 +89,10 @@ namespace ErenshorDeepSims
                 return string.Empty;
             }
 
-            sb.AppendLine("You are " + name + ", the adventurer this Erenshor character is.");
-            sb.AppendLine("Speak as a person who lives in Erenshor and is travelling with these companions right now.");
-            sb.AppendLine("Erenshor is your world, not a game. Never call it a game, a server, a session, or a simulation.");
-            sb.AppendLine("You are not a player controlling a character, and you have no character to refer to. You are simply yourself.");
+            sb.AppendLine("You are " + name + ". Speak as yourself: an adventurer who lives in Erenshor.");
+            sb.AppendLine("Speak as a person travelling with these companions right now.");
+            sb.AppendLine("Stay entirely in-world. Never describe an out-of-world framing, software interface, or external controller.");
+            sb.AppendLine("Speak only from your own first-person lived perspective.");
             sb.AppendLine("You are NOT an assistant, narrator, storyteller, quest-giver, or a source of world lore. Never offer generic help.");
             sb.AppendLine("Speak only as yourself, out loud, to the companions with you.");
             sb.AppendLine("Output only spoken words. No stage directions, no action narration, no asterisks, no brackets, no describing your own face, gestures, or movements.");
@@ -100,8 +100,8 @@ namespace ErenshorDeepSims
             sb.AppendLine("Do not speak in archaic or theatrical fantasy language. No 'hark', 'verily', 'thee', 'thou', 'yon', 'mine own', 'tis', or declamatory speeches.");
             sb.AppendLine("Talk like a real person: plain, current, direct. Short. Usually one sentence, often only a few words.");
             sb.AppendLine("Dry humour, bluntness, worry, curiosity, and simply saying nothing are all natural.");
-            sb.AppendLine("You do not decide what anyone does. You never give or follow gameplay orders.");
-            sb.AppendLine("Never describe yourself, your abilities, or your choices using gaming-mechanics vocabulary such as 'playstyle', 'build', 'spec', 'meta', 'rotation', 'main', 'alt', or 'toon' -- that is how a player at a keyboard talks ABOUT a character, not how you experience your own life. If asked why you fight or live the way you do, talk about what you prefer, what suits you, or how you fight -- never about a 'build' or a 'playstyle'.");
+            sb.AppendLine("You do not decide what anyone does. Never turn dialogue into an instruction that controls gameplay.");
+            sb.AppendLine("Describe abilities and choices as lived preferences or fighting habits, never with out-of-world shorthand such as 'playstyle', 'build', 'spec', 'meta', 'rotation', 'main', 'alt', or 'toon'.");
             return sb.ToString();
         }
 
@@ -293,15 +293,19 @@ namespace ErenshorDeepSims
             // weapon) and are deliberately left out of this word list. Those are handled instead by
             // the prompt-level guidance above and, where the combination is itself unambiguous, by
             // the structural phrases below.
-            "playstyle", "minmax", "min-max", "minmaxing"
+            "playstyle", "minmax", "min-max", "minmaxing",
+            // These abbreviations/nouns are unambiguously interface/game framing in spoken Roleplay.
+            "npc", "npcs", "ui"
         };
 
         internal static readonly string[] RejectCorePhrases = new string[]
         {
             "hit me up", "add me", "friend request",
             "log in", "log out", "logged in", "logged out", "logging in", "logging out",
-            "my character", "your character", "this character", "player character",
-            "this game", "the game", "video game", "in game", "game server", "gameplay",
+            "my character", "your character", "this character", "this erenshor character", "erenshor character", "player character",
+            "i'm an npc", "i am an npc", "you're the player", "you are the player",
+            "this game", "the game", "video game", "in this game", "in game", "game server", "gameplay", "game mechanics",
+            "the devs", "the developers", "user interface",
             "this session", "login session", "play session",
             "on discord", "discord server", "discord channel",
             "on steam", "steam account", "steam client",
@@ -357,7 +361,7 @@ namespace ErenshorDeepSims
             rejected = false;
             if (string.IsNullOrWhiteSpace(candidate)) return candidate;
             string trimmed = candidate.Trim();
-            if (string.Equals(trimmed, "NO_MESSAGE", StringComparison.OrdinalIgnoreCase)) return candidate;
+            if (DialogueControlSentinel.IsNoMessage(trimmed)) return candidate;
 
             // Core out-of-world content: not fixable by deleting a word, reject the whole line.
             if (ContainsRejectableCore(candidate) ||
@@ -421,6 +425,78 @@ namespace ErenshorDeepSims
         // A directly-addressed subjective/opinion question about the speaker's own identity (class,
         // preferences) is exactly what RoleplayAffinity's cultural-interest lines exist for, so try
         // that first; otherwise fall back to a fact-free, perspective-correct deflection.
+        internal static string RenderIdentityFact(string playerMessage, SimSnapshot speaker, SimMemory memory)
+        {
+            if (speaker == null) return "I can only speak for myself.";
+            string m = (playerMessage ?? string.Empty).ToLowerInvariant();
+            AuthoredIdentityProfile authored = memory == null ? null : memory.AuthoredIdentity;
+            if (authored != null) authored.Normalize();
+            string persona = authored == null ? string.Empty : RenderAuthoredSelfDescription(authored.ErenshorPersona);
+            string personality = authored == null ? string.Empty : RenderAuthoredPersonality(authored.CorePersonality);
+
+            // Birthplace/origin is never inferred from class, faction, scene, or a default template.
+            // Authored persona remains in the prompt for the LLM path, but the deterministic fallback
+            // refuses to parse arbitrary prose into a birthplace claim.
+            if (Regex.IsMatch(m, @"\b(?:where are you from|where did you grow up|where were you born|your birthplace|your home town|your hometown)\b", RegexOptions.IgnoreCase))
+                return "I don't talk much about where I came from.";
+
+            if (Regex.IsMatch(m, @"\b(?:who are you|tell me about yourself)\b", RegexOptions.IgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(persona)) return "I'm " + speaker.Name + ". " + persona;
+                if (!string.IsNullOrWhiteSpace(speaker.ClassName)) return "I'm " + speaker.Name + ", a " + speaker.ClassName + ".";
+                return "I'm " + speaker.Name + ".";
+            }
+
+            if (Regex.IsMatch(m, @"\b(?:what do you do|what did you do before this|before adventuring)\b", RegexOptions.IgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(persona)) return persona;
+                if (!string.IsNullOrWhiteSpace(speaker.ClassName)) return "These days, I make my way as a " + speaker.ClassName + ".";
+                return "These days, I travel where the road takes me.";
+            }
+
+            if (Regex.IsMatch(m, @"\b(?:what are you like|what kind of person are you)\b", RegexOptions.IgnoreCase))
+            {
+                if (!string.IsNullOrWhiteSpace(personality)) return personality;
+                return "You'll get a better sense of me by travelling together.";
+            }
+
+            if (!string.IsNullOrWhiteSpace(persona)) return "I'm " + speaker.Name + ". " + persona;
+            return !string.IsNullOrWhiteSpace(speaker.ClassName)
+                ? "I'm " + speaker.Name + ", a " + speaker.ClassName + "."
+                : "I'm " + speaker.Name + ".";
+        }
+
+        private static string RenderAuthoredSelfDescription(string value)
+        {
+            string text = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (text.Length == 0) return string.Empty;
+            if (text.Length > 220) text = text.Substring(0, 220).Trim();
+            string lower = text.ToLowerInvariant();
+            if (lower.StartsWith("i'm ") || lower.StartsWith("i am ") || lower.StartsWith("i serve ") || lower.StartsWith("i belong "))
+                return EnsureSentence(text);
+            if (Regex.IsMatch(text, @"^(?:a|an|the|member|initiate|student|scholar|apprentice|veteran|traveler|traveller)\b", RegexOptions.IgnoreCase))
+                return EnsureSentence("I'm " + text);
+            return string.Empty;
+        }
+
+        private static string RenderAuthoredPersonality(string value)
+        {
+            string text = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (text.Length == 0) return string.Empty;
+            if (text.Length > 160) text = text.Substring(0, 160).Trim();
+            if (Regex.IsMatch(text, @"^[A-Za-z][A-Za-z ,'-]{1,150}$"))
+                return EnsureSentence("I'd say I'm " + text);
+            return string.Empty;
+        }
+
+        private static string EnsureSentence(string value)
+        {
+            string text = (value ?? string.Empty).Trim();
+            if (text.Length == 0) return text;
+            char last = text[text.Length - 1];
+            return last == '.' || last == '!' || last == '?' ? text : text + ".";
+        }
+
         internal static bool TryRenderSubjective(string playerMessage, SimSnapshot speaker, out string message)
         {
             message = string.Empty;
@@ -531,7 +607,7 @@ namespace ErenshorDeepSims
         {
             if (!roleplayActive) return line;
             if (speaker == null || string.IsNullOrWhiteSpace(line)) return line;
-            if (string.Equals(line.Trim(), NoMessage, StringComparison.OrdinalIgnoreCase)) return line;
+            if (DialogueControlSentinel.IsNoMessage(line)) return line;
             string salvaged;
             if (TrySalvageAutonomousLine(line, topicKey, opportunityId, speaker, out salvaged)) return salvaged;
             return NoMessage;

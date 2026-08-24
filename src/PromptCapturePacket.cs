@@ -90,9 +90,21 @@ namespace ErenshorDeepSims
         internal string SessionId = string.Empty;
         internal int TurnId;
         internal int RequestId;
+        // Stable lightweight identity supplied by DialogueRequestCorrelation. Unlike RequestId,
+        // this remains available in normal diagnostics when capture is disabled.
+        internal long CorrelationRequestId;
+        internal int CorrelationAttempt;
+        internal long CorrelationThreadId;
+        internal string CorrelationCandidateHash = string.Empty;
+        internal string CorrelationDisposition = string.Empty;
         internal string Utc = string.Empty;
         internal string Stage = string.Empty;
         internal string Source = string.Empty;
+        internal string Lane = string.Empty;
+        internal int SessionGeneration;
+        internal int ConversationGeneration;
+        internal string VerifiedSourceId = string.Empty;
+        internal string CorrelationId = string.Empty;
         internal bool IsClassifier;
         internal string ManualLabel = string.Empty;
 
@@ -194,6 +206,12 @@ namespace ErenshorDeepSims
         internal string FallbackKind = "none";
         internal bool Displayed;
         internal string FinalSource = string.Empty;
+        internal bool QueueAccepted;
+        internal string VisibilityDisposition = "not_applicable";
+        internal bool TopicFatigueAdvanced;
+        internal bool ConversationMomentAdded;
+        internal bool PreferencePersisted;
+        internal bool CallbackStateAdvanced;
 
         internal List<string> InterestingCases = new List<string>();
 
@@ -233,9 +251,19 @@ namespace ErenshorDeepSims
             w.String("sessionId", packet.SessionId);
             w.Number("turnId", packet.TurnId);
             w.Number("requestId", packet.RequestId);
+            w.Number("correlationRequestId", packet.CorrelationRequestId);
+            w.Number("attempt", packet.CorrelationAttempt);
+            w.Number("threadId", packet.CorrelationThreadId);
+            w.String("candidateHash", packet.CorrelationCandidateHash);
+            w.String("disposition", packet.CorrelationDisposition);
             w.String("utc", packet.Utc);
             w.String("stage", packet.Stage);
             w.String("source", packet.Source);
+            w.String("lane", packet.Lane);
+            w.Number("sessionGeneration", packet.SessionGeneration);
+            w.Number("conversationGeneration", packet.ConversationGeneration);
+            w.String("verifiedSourceId", packet.VerifiedSourceId);
+            w.String("correlationId", packet.CorrelationId);
             if (!string.IsNullOrEmpty(packet.ManualLabel)) w.String("manualLabel", packet.ManualLabel);
 
             w.StartObject("speaker");
@@ -387,6 +415,11 @@ namespace ErenshorDeepSims
             w.Number("schemaVersion", packet.SchemaVersion);
             w.String("sessionId", packet.SessionId);
             w.Number("requestId", packet.RequestId);
+            w.Number("correlationRequestId", packet.CorrelationRequestId);
+            w.Number("attempt", packet.CorrelationAttempt);
+            w.Number("threadId", packet.CorrelationThreadId);
+            w.String("candidateHash", packet.CorrelationCandidateHash);
+            w.String("disposition", packet.CorrelationDisposition);
             // Single-model invariant check: these two should always match each attempt's own "model"
             // below AND its nested serializedRequest.model. Recorded once at the packet level since
             // they do not vary per attempt.
@@ -483,6 +516,14 @@ namespace ErenshorDeepSims
             w.Bool("displayed", packet.Displayed);
             w.String("source", packet.FinalSource);
             w.String("visibleText", packet.FinalVisibleContent);
+            w.Bool("queueAccepted", packet.QueueAccepted);
+            w.String("visibilityDisposition", packet.VisibilityDisposition);
+            w.StartObject("advancedBeforeVisibility");
+            w.Bool("topicFatigueAdvanced", packet.TopicFatigueAdvanced);
+            w.Bool("conversationMomentAdded", packet.ConversationMomentAdded);
+            w.Bool("preferencePersisted", packet.PreferencePersisted);
+            w.Bool("callbackStateAdvanced", packet.CallbackStateAdvanced);
+            w.EndObject();
             w.EndObject();
 
             w.StartArray("interestingCases");
@@ -503,6 +544,7 @@ namespace ErenshorDeepSims
             w.Number("turnId", packet.TurnId);
             w.String("stage", packet.Stage);
             w.String("source", packet.Source);
+            w.String("lane", packet.Lane);
             w.String("speaker", packet.SpeakerName);
             w.String("route", packet.EffectiveTurnType);
             w.String("knowledgeNeed", packet.EffectiveKnowledgeNeed);
@@ -511,6 +553,7 @@ namespace ErenshorDeepSims
             w.Number("attempts", packet.AttemptCount);
             w.String("grounding", packet.GroundingDecision);
             w.Bool("displayed", packet.Displayed);
+            w.String("visibilityDisposition", packet.VisibilityDisposition);
             if (!string.IsNullOrEmpty(packet.ManualLabel)) w.String("manualLabel", packet.ManualLabel);
             w.StartArray("interestingCases");
             for (int i = 0; i < packet.InterestingCases.Count; i++) w.StringArrayItem(packet.InterestingCases[i]);

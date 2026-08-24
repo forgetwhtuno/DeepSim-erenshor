@@ -79,7 +79,7 @@ namespace ErenshorDeepSims
             request.Method = "GET";
             request.Timeout = timeoutMs;
             request.ReadWriteTimeout = timeoutMs;
-            request.UserAgent = "ErenshorDeepSims/0.7.1 (+local Lunaris mod)";
+            request.UserAgent = "ErenshorDeepSims/0.8.2 (+local Lunaris mod)";
             request.Accept = "application/json";
             try
             {

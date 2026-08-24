@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace ErenshorDeepSims
 {
@@ -52,6 +53,32 @@ namespace ErenshorDeepSims
         }
     }
 
+    internal enum SilenceFatiguePressure { Normal, Reduced, Strong, ForceSafeSeed }
+
+    internal sealed class SilenceFatigueTracker
+    {
+        private int _consecutive;
+        internal int Consecutive { get { return _consecutive; } }
+
+        internal SilenceFatiguePressure NoteSilence(bool eligible)
+        {
+            if (!eligible) { Reset(); return SilenceFatiguePressure.Normal; }
+            _consecutive++;
+            // Full-party Lively downtime should seek a subject on the assessment immediately
+            // after one complete silence, while still leaving both selection and output fallible.
+            if (_consecutive >= 3) return SilenceFatiguePressure.ForceSafeSeed;
+            if (_consecutive == 2) return SilenceFatiguePressure.Strong;
+            return SilenceFatiguePressure.Normal;
+        }
+
+        internal double SilenceAdjustment
+        {
+            get { return _consecutive >= 2 ? -20.0 : 0.0; }
+        }
+
+        internal void Reset() { _consecutive = 0; }
+    }
+
     internal static class SocialIntentGuard
     {
         // Deliberately small semantic fence, not a general topic classifier.  It only protects
@@ -69,6 +96,8 @@ namespace ErenshorDeepSims
             if (key == "adventure_preferences" || key == "future_activity") return Has(t, "dungeon", "camp", "grind", "grinding", "exploring", "explore", "adventure");
             if (key == "pace_preferences" || key == "pace_preference") return Has(t, "pace", "careful", "fast", "slow", "pull", "pulls");
             if (key == "food_music" || key == "ordinary_downtime") return Has(t, "music", "food", "eat", "snack", "weather");
+            if (key == "free_social_question" || key == "free_social_hypothetical" || key == "free_social_impulse")
+                return !GroundingGuard.HasInstructionLeak(text);
             if (key == "enemy_design") return Has(t, "enemy", "enemies", "mob", "mobs", "fight", "design");
             if (key == "verified_outing" || key == "verified_history" || key == AmbientTopics.SessionObservation ||
                 key.StartsWith("memory_", StringComparison.OrdinalIgnoreCase))
@@ -174,6 +203,12 @@ namespace ErenshorDeepSims
                 "ask which enemy type has the most interesting design, without inventing a fight", 30.0),
             new AmbientSeedDefinition("ordinary_downtime", "smalltalk",
                 "start directly with one tiny off-topic question about food, weather, or music; casual 'lol', ':D', or ':)' is welcome when it fits", 24.0),
+            new AmbientSeedDefinition("free_social_question", "smalltalk",
+                "ask one harmless opinion question that needs no factual premise, such as a favorite kind of adventure or ideal way to spend a quiet hour", 31.0),
+            new AmbientSeedDefinition("free_social_hypothetical", "smalltalk",
+                "offer one playful what-if choice with no claim that anything happened", 31.0),
+            new AmbientSeedDefinition("free_social_impulse", "smalltalk",
+                "say one brief present-tense mood, preference, joke, or social impulse without inventing history", 31.0),
             new AmbientSeedDefinition("other_sim_preference", "social",
                 "ask another Sim for a harmless class or zone preference", 34.0),
             new AmbientSeedDefinition("light_tease", "social",
@@ -664,6 +699,7 @@ namespace ErenshorDeepSims
     {
         internal string TopicKey;
         internal string Speaker;
+        internal string Source;
         internal double Score;
         internal string ExcludedReason;
         internal List<SeedScoreComponent> Components;
@@ -683,6 +719,7 @@ namespace ErenshorDeepSims
         internal string SelectedSpeaker = string.Empty;
         internal string SelectedPromptHint = string.Empty;
         internal string SelectedFact = string.Empty;
+        internal string SelectedSource = string.Empty;
         internal double SelectedScore;
         internal string Reason = string.Empty;
         internal string Outcome = "pending";
@@ -746,7 +783,7 @@ namespace ErenshorDeepSims
         {
             return Select(opportunityId, mode, candidates, speakers, fatigue, activeConversationId, now,
                 silenceNormal, silenceCamp, DefaultSilenceRelax, quietPressure, silenceAdjust,
-                forceSpeech, captureComponents, null);
+                forceSpeech, captureComponents, null, 0.0);
         }
 
         // familiarityBySpeaker is an optional, bounded 0..1 tone nudge (Sim-to-player familiarity),
@@ -760,14 +797,15 @@ namespace ErenshorDeepSims
         {
             return Select(opportunityId, mode, candidates, speakers, fatigue, activeConversationId, now,
                 silenceNormal, silenceCamp, DefaultSilenceRelax, quietPressure, silenceAdjust,
-                forceSpeech, captureComponents, familiarityBySpeaker);
+                forceSpeech, captureComponents, familiarityBySpeaker, 0.0);
         }
 
         internal static AmbientSeedDecision Select(long opportunityId, SocialContextMode mode,
             IList<AmbientSeedCandidate> candidates, IList<SimSnapshot> speakers,
             TopicFatigueTracker fatigue, long activeConversationId, DateTime now,
             double silenceNormal, double silenceCamp, double silenceRelax, double quietPressure, double silenceAdjust,
-            bool forceSpeech, bool captureComponents, IDictionary<string, double> familiarityBySpeaker)
+            bool forceSpeech, bool captureComponents, IDictionary<string, double> familiarityBySpeaker,
+            double contextualSourcePreference = 0.0)
         {
             AmbientSeedDecision decision = new AmbientSeedDecision();
             decision.OpportunityId = opportunityId;
@@ -799,18 +837,18 @@ namespace ErenshorDeepSims
 
                 if (now > candidate.ExpiresUtc)
                 {
-                    decision.Candidates.Add(Excluded(candidate.TopicKey, "expired"));
+                    decision.Candidates.Add(Excluded(candidate.TopicKey, candidate.FactSource, "expired"));
                     continue;
                 }
                 if (candidate.HasFact && candidate.FactSource.Length == 0)
                 {
-                    decision.Candidates.Add(Excluded(candidate.TopicKey, "unsupported provenance"));
+                    decision.Candidates.Add(Excluded(candidate.TopicKey, candidate.FactSource, "unsupported provenance"));
                     continue;
                 }
                 string prerequisiteReason;
                 if (!AmbientSeedPrerequisitePolicy.IsSupported(candidate, speakers, out prerequisiteReason))
                 {
-                    decision.Candidates.Add(Excluded(candidate.TopicKey, prerequisiteReason));
+                    decision.Candidates.Add(Excluded(candidate.TopicKey, candidate.FactSource, prerequisiteReason));
                     continue;
                 }
 
@@ -852,6 +890,12 @@ namespace ErenshorDeepSims
                     double personality = PersonalityAffinity(sim, candidate.TopicKey, familiarity);
                     if (personality != 0.0) { score += personality; Note(components, "personality", personality); }
 
+                    // This is a small tie-break-style nudge, not a category scheduler. It runs only
+                    // when the caller has established full-party Lively downtime and never creates,
+                    // validates, or makes a candidate eligible by itself.
+                    double contextual = ContextualSourceBonus(candidate, contextualSourcePreference);
+                    if (contextual != 0.0) { score += contextual; Note(components, "contextual_source", contextual); }
+
                     // Deterministic per-opportunity variation.  This keeps a fixed input reproducible
                     // while stopping the highest static base score from always winning.
                     double jitter = Jitter(opportunityId, candidate.TopicKey, sim.Name);
@@ -873,6 +917,7 @@ namespace ErenshorDeepSims
                     {
                         TopicKey = candidate.TopicKey,
                         Speaker = sim.Name,
+                        Source = PrivacySafeSource(candidate),
                         Score = Math.Round(score, 2),
                         Components = components
                     };
@@ -881,7 +926,7 @@ namespace ErenshorDeepSims
 
                 if (bestForCandidate == null)
                 {
-                    decision.Candidates.Add(Excluded(candidate.TopicKey, exclusion ?? "no eligible speaker"));
+                    decision.Candidates.Add(Excluded(candidate.TopicKey, candidate.FactSource, exclusion ?? "no eligible speaker"));
                     continue;
                 }
 
@@ -891,6 +936,7 @@ namespace ErenshorDeepSims
                     best = bestForCandidate;
                     decision.SelectedPromptHint = candidate.PromptHint;
                     decision.SelectedFact = candidate.Fact;
+                    decision.SelectedSource = PrivacySafeSource(candidate);
                     decision.SelectedCooldownGroup = candidate.CooldownGroup;
                 }
             }
@@ -907,6 +953,7 @@ namespace ErenshorDeepSims
             {
                 decision.SelectedPromptHint = string.Empty;
                 decision.SelectedFact = string.Empty;
+                decision.SelectedSource = string.Empty;
                 decision.SelectedCooldownGroup = string.Empty;
                 decision.Outcome = "silence";
                 decision.Reason = "no usable candidate subject";
@@ -917,6 +964,7 @@ namespace ErenshorDeepSims
             {
                 decision.SelectedPromptHint = string.Empty;
                 decision.SelectedFact = string.Empty;
+                decision.SelectedSource = string.Empty;
                 decision.SelectedCooldownGroup = string.Empty;
                 decision.SelectedScore = best.Score;
                 decision.Outcome = "silence";
@@ -934,6 +982,21 @@ namespace ErenshorDeepSims
             return decision;
         }
 
+        private static double ContextualSourceBonus(AmbientSeedCandidate candidate, double preference)
+        {
+            if (candidate == null || preference <= 0.0) return 0.0;
+            string topic = (candidate.TopicKey ?? string.Empty).ToLowerInvariant();
+            string source = (candidate.FactSource ?? string.Empty).ToLowerInvariant();
+            double weight = 0.0;
+            if (topic.StartsWith("callback_")) weight = 4.0;
+            else if (topic.StartsWith("identity:")) weight = 3.5;
+            else if (topic.StartsWith("recent_life:")) weight = 3.0;
+            else if (topic.StartsWith("camp_") || source.IndexOf("campmaster") >= 0) weight = 2.8;
+            else if (topic.StartsWith("ambient_chat:")) weight = 2.2;
+            else if (topic.StartsWith("free_social_")) weight = 1.4;
+            return weight * Math.Min(1.0, preference);
+        }
+
         private static bool Beats(AmbientSeedScore candidate, AmbientSeedScore incumbent)
         {
             if (candidate.Score != incumbent.Score) return candidate.Score > incumbent.Score;
@@ -942,9 +1005,28 @@ namespace ErenshorDeepSims
             return string.Compare(candidate.Speaker, incumbent.Speaker, StringComparison.Ordinal) < 0;
         }
 
-        private static AmbientSeedScore Excluded(string topicKey, string reason)
+        private static AmbientSeedScore Excluded(string topicKey, string source, string reason)
         {
-            return new AmbientSeedScore { TopicKey = topicKey, Speaker = string.Empty, ExcludedReason = reason };
+            return new AmbientSeedScore { TopicKey = topicKey, Source = PrivacySafeSource(source, topicKey), Speaker = string.Empty, ExcludedReason = reason };
+        }
+
+        private static string PrivacySafeSource(AmbientSeedCandidate candidate)
+        {
+            return candidate == null ? "ambient" : PrivacySafeSource(candidate.FactSource, candidate.TopicKey);
+        }
+
+        private static string PrivacySafeSource(string source, string topicKey)
+        {
+            if (string.IsNullOrWhiteSpace(source)) return "ambient";
+            string lower = source.ToLowerInvariant();
+            if (lower.IndexOf("pinned") >= 0) return "authored-pinned:" + SeedHash.Stable(topicKey ?? string.Empty).ToString("x8");
+            if (lower.IndexOf("shared") >= 0) return "shared-memory:" + SeedHash.Stable(topicKey ?? string.Empty).ToString("x8");
+            if (lower.IndexOf("identity") >= 0) return "authored-identity:" + SeedHash.Stable(topicKey ?? string.Empty).ToString("x8");
+            if (lower.IndexOf("competitive") >= 0 || lower.IndexOf("pvp") >= 0 || lower.IndexOf("duel") >= 0 || lower.IndexOf("nemesis") >= 0)
+                return "verified-competitive:" + SeedHash.Stable(topicKey ?? string.Empty).ToString("x8");
+            if (lower.IndexOf("memory") >= 0 || lower.IndexOf("outing") >= 0) return "verified-memory:" + SeedHash.Stable(topicKey ?? string.Empty).ToString("x8");
+            if (lower.IndexOf("session") >= 0 || lower.IndexOf("telemetry") >= 0) return "verified-session";
+            return source.Length <= 64 ? source : source.Substring(0, 64);
         }
 
         private static void Note(List<SeedScoreComponent> components, string name, double value)
@@ -1013,6 +1095,9 @@ namespace ErenshorDeepSims
         internal const string Guild = "player_topic:guild";
         internal const string Duel = "player_topic:duel";
         internal const string FutureActivity = "player_topic:future_activity";
+        internal const string StudyMagic = "player_topic:study_magic";
+        internal const string FaithOrder = "player_topic:faith_order";
+        internal const string WorkLife = "player_topic:work_life";
 
         // Deliberately narrow keyword lists in the same conservative style as the rest of the social
         // director (see SocialDirector.LooksTrivial/LooksLikeGreeting). Ambiguous or unmatched text
@@ -1032,6 +1117,12 @@ namespace ErenshorDeepSims
                 return Duel;
             if (Contains(padded, " what next ", " next adventure ", " where next ", " what should we do next "))
                 return FutureActivity;
+            if (Contains(padded, " spell ", " spells ", " spellcraft ", " mage academy ", " magic study ", " studying magic "))
+                return StudyMagic;
+            if (Contains(padded, " temple ", " faith ", " holy order ", " religious order ", " our order "))
+                return FaithOrder;
+            if (Contains(padded, " job ", " college ", " school after ", " graduation ", " graduate ", " work after ", " at work "))
+                return WorkLife;
             return null;
         }
 
@@ -1106,6 +1197,32 @@ namespace ErenshorDeepSims
             return seeds;
         }
 
+        // Relevance-only context for authored identity/memory candidate admission. This is transient
+        // HEARD material: it can make an already-authored fact topical, but it never becomes that
+        // fact's provenance and is never persisted. Keep it tightly bounded and internal.
+        internal string BuildRelevanceContext(DateTime now)
+        {
+            lock (_lock)
+            {
+                _entries.RemoveAll(delegate(Entry e) { return now > e.ExpiresUtc; });
+                StringBuilder sb = new StringBuilder();
+                int start = Math.Max(0, _entries.Count - 3);
+                for (int i = start; i < _entries.Count; i++)
+                {
+                    Entry e = _entries[i];
+                    if (e == null) continue;
+                    if (!string.IsNullOrWhiteSpace(e.TopicKey)) sb.Append(e.TopicKey).Append(' ');
+                    if (!string.IsNullOrWhiteSpace(e.SourceText))
+                    {
+                        string text = e.SourceText.Length > 120 ? e.SourceText.Substring(0, 120) : e.SourceText;
+                        sb.Append(text).Append(' ');
+                    }
+                    if (sb.Length >= 360) break;
+                }
+                return sb.Length > 360 ? sb.ToString(0, 360).Trim() : sb.ToString().Trim();
+            }
+        }
+
         internal void Clear() { lock (_lock) _entries.Clear(); }
     }
 
@@ -1135,6 +1252,69 @@ namespace ErenshorDeepSims
         internal float Max;
         internal string Source = string.Empty;
         internal DateTime ObservedUtc;
+    }
+
+    // Optional sibling integrations may report the same underlying PvP/Nemesis episode through
+    // two read-only event contracts. Collapse only terminal competitive copies; ordinary events and
+    // distinct rematches remain independent. This tracker is process-local, bounded, and never writes
+    // sibling state.
+    internal static class CompetitiveEventCorrelation
+    {
+        private sealed class SeenEpisode { internal string Source; internal DateTime Utc; }
+        private static readonly object Gate = new object();
+        private static readonly Dictionary<string, SeenEpisode> Seen = new Dictionary<string, SeenEpisode>(StringComparer.OrdinalIgnoreCase);
+        private const int MaxSeen = 64;
+        private const double CrossSourceWindowSeconds = 30.0;
+
+        internal static bool TryAcceptTerminal(string source, string matchId, string opponent, string zone, DateTime now, out string correlationKey)
+        {
+            string idKey = string.IsNullOrWhiteSpace(matchId) ? string.Empty : "id:" + NormalizeCorrelation(matchId);
+            string actorKey = "actor:" + NormalizeCorrelation(opponent) + "|zone:" + NormalizeCorrelation(zone);
+            correlationKey = idKey.Length > 0 ? idKey : actorKey;
+            lock (Gate)
+            {
+                Prune(now);
+                SeenEpisode prior;
+                if (idKey.Length > 0 && Seen.TryGetValue(idKey, out prior) && IsDuplicate(prior, source, now)) return false;
+                if (Seen.TryGetValue(actorKey, out prior) && IsDuplicate(prior, source, now)) return false;
+                SeenEpisode entry = new SeenEpisode { Source = source ?? string.Empty, Utc = now };
+                if (idKey.Length > 0) Seen[idKey] = entry;
+                Seen[actorKey] = entry;
+                while (Seen.Count > MaxSeen) RemoveOldest();
+                return true;
+            }
+        }
+
+        internal static void ResetForTests() { lock (Gate) Seen.Clear(); }
+
+        private static bool IsDuplicate(SeenEpisode prior, string source, DateTime now)
+        {
+            if (prior == null) return false;
+            return !string.Equals(prior.Source, source ?? string.Empty, StringComparison.OrdinalIgnoreCase) &&
+                Math.Abs((now - prior.Utc).TotalSeconds) <= CrossSourceWindowSeconds;
+        }
+
+        private static void Prune(DateTime now)
+        {
+            List<string> remove = null;
+            foreach (KeyValuePair<string, SeenEpisode> pair in Seen)
+                if (pair.Value == null || Math.Abs((now - pair.Value.Utc).TotalSeconds) > 300.0)
+                    (remove ?? (remove = new List<string>())).Add(pair.Key);
+            if (remove != null) for (int i = 0; i < remove.Count; i++) Seen.Remove(remove[i]);
+        }
+
+        private static void RemoveOldest()
+        {
+            string key = null; DateTime oldest = DateTime.MaxValue;
+            foreach (KeyValuePair<string, SeenEpisode> pair in Seen)
+                if (pair.Value != null && pair.Value.Utc < oldest) { oldest = pair.Value.Utc; key = pair.Key; }
+            if (key != null) Seen.Remove(key); else Seen.Clear();
+        }
+
+        private static string NormalizeCorrelation(string value)
+        {
+            return Regex.Replace((value ?? string.Empty).Trim().ToLowerInvariant(), @"[^a-z0-9_-]+", "_");
+        }
     }
 
     internal static class AmbientSeedProducers
@@ -1217,8 +1397,15 @@ namespace ErenshorDeepSims
         internal static List<AmbientSeedCandidate> BuildSharedMemoryCandidates(SimSnapshot sim, SimMemory memory,
             long opportunityId, DateTime now)
         {
+            return BuildSharedMemoryCandidates(sim, memory, opportunityId, now, string.Empty);
+        }
+
+        internal static List<AmbientSeedCandidate> BuildSharedMemoryCandidates(SimSnapshot sim, SimMemory memory,
+            long opportunityId, DateTime now, string contextText)
+        {
             List<AmbientSeedCandidate> seeds = new List<AmbientSeedCandidate>();
             if (sim == null || string.IsNullOrWhiteSpace(sim.Name) || memory == null) return seeds;
+            memory.Normalize();
             string ownerKey = sim.Name.Trim().ToLowerInvariant();
             string[] onlyOwner = new string[] { sim.Name };
 
@@ -1227,18 +1414,171 @@ namespace ErenshorDeepSims
                 seeds.Add(new AmbientSeedCandidate(
                     "memory:" + ownerKey + ":" + SeedHash.Stable(importantMemory).ToString("x"), "memory",
                     "briefly bring up this specific remembered moment, exactly as stated, without adding new detail",
-                    20.0, importantMemory, "verified " + sim.Name + " important-memory record",
-                    0, 0.0, now, DateTime.MaxValue, onlyOwner));
+                    30.0, importantMemory, "verified important-memory record",
+                    45, 0.0, now, DateTime.MaxValue, onlyOwner));
 
-            string outingSummary = PickBounded(memory.OutingSummaries, opportunityId + 1, 4);
+            string outingSummary = VerifiedOutingHistoryPolicy.SanitizeForPrompt(
+                PickBounded(memory.OutingSummaries, opportunityId + 1, 4));
             if (!string.IsNullOrWhiteSpace(outingSummary))
                 seeds.Add(new AmbientSeedCandidate(
                     "outing:" + ownerKey + ":" + SeedHash.Stable(outingSummary).ToString("x"), "memory",
-                    "briefly recall this past outing summary, exactly as stated, without adding a new detail",
-                    18.0, outingSummary, "verified " + sim.Name + " outing summary",
-                    0, 0.0, now, DateTime.MaxValue, onlyOwner));
+                    "briefly recall this past outing summary without adding a new detail",
+                    28.0, outingSummary, "verified outing-memory record",
+                    40, 0.0, now, DateTime.MaxValue, onlyOwner));
 
+            AddStructuredMemorySeeds(seeds, sim, memory.AuthoredIdentity == null ? null : memory.AuthoredIdentity.PinnedMemories,
+                "pinned", 34.0, contextText, true, now);
+            AddStructuredMemorySeeds(seeds, sim, memory.AuthoredIdentity == null ? null : memory.AuthoredIdentity.SharedHistory,
+                "shared", 32.0, contextText, false, now);
+            AddStructuredMemorySeeds(seeds, sim, memory.StructuredMemories,
+                "learned", 29.0, contextText, false, now);
+            AddRecentCompetitiveEventSeed(seeds, sim, memory, opportunityId, now);
             return seeds;
+        }
+
+        internal static List<AmbientSeedCandidate> BuildIdentityCandidates(SimSnapshot sim, SimMemory memory,
+            string contextText, bool roleplay, DateTime now)
+        {
+            List<AmbientSeedCandidate> seeds = new List<AmbientSeedCandidate>();
+            if (sim == null || string.IsNullOrWhiteSpace(sim.Name) || memory == null || memory.AuthoredIdentity == null) return seeds;
+            memory.AuthoredIdentity.Normalize();
+            AuthoredIdentityProfile authored = memory.AuthoredIdentity;
+            string[] onlyOwner = new string[] { sim.Name };
+
+            if (!string.IsNullOrWhiteSpace(authored.ErenshorPersona) && IdentityContextPolicy.IsRelevant(authored.ErenshorPersona, contextText))
+                seeds.Add(new AmbientSeedCandidate("identity:persona:" + sim.Name.ToLowerInvariant(), "identity",
+                    "use this relevant authored Erenshor identity as the subject; reveal only the part relevant now, not a biography dump",
+                    35.0, IdentitySchema.Bound(authored.ErenshorPersona, 420), "authored identity erenshorPersona", 65, 0.0, now, DateTime.MaxValue, onlyOwner));
+
+            // The personal/modern layer is only conversational material in MMO perspective.
+            if (!roleplay && !string.IsNullOrWhiteSpace(authored.PersonalBackground) && IdentityContextPolicy.IsRelevant(authored.PersonalBackground, contextText))
+                seeds.Add(new AmbientSeedCandidate("identity:background:" + sim.Name.ToLowerInvariant(), "identity",
+                    "use only the relevant part of this authored personal background; do not dump biography",
+                    34.0, IdentitySchema.Bound(authored.PersonalBackground, 360), "authored identity personalBackground", 60, 0.0, now, DateTime.MaxValue, onlyOwner));
+
+            if (!string.IsNullOrWhiteSpace(authored.RelationshipToPlayer) && IdentityContextPolicy.IsRelevant(authored.RelationshipToPlayer, contextText))
+                seeds.Add(new AmbientSeedCandidate("identity:relationship:" + sim.Name.ToLowerInvariant(), "identity",
+                    "briefly express the relevant authored relationship without inventing shared events",
+                    33.0, IdentitySchema.Bound(authored.RelationshipToPlayer, 260), "authored identity relationship", 60, 0.0, now, DateTime.MaxValue, onlyOwner));
+            return seeds;
+        }
+
+        internal static AmbientSeedCandidate BuildRecentLifeCandidate(SimSnapshot sim, SimMemory memory, DateTime now)
+        {
+            if (sim == null || string.IsNullOrWhiteSpace(sim.Name) || memory == null || memory.StructuredMemories == null) return null;
+            for (int i = memory.StructuredMemories.Count - 1; i >= 0; i--)
+            {
+                StructuredMemoryRecord record = memory.StructuredMemories[i];
+                if (record == null || string.IsNullOrWhiteSpace(record.Text)) continue;
+                if (!string.Equals(record.Source, RecentLifePolicy.Source, StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(record.SourceSystem, RecentLifePolicy.SourceSystem, StringComparison.OrdinalIgnoreCase)) continue;
+                DateTime observed;
+                if (!DateTime.TryParse(record.Utc, out observed)) observed = now;
+                return new AmbientSeedCandidate("recent_life:" + sim.Name.ToLowerInvariant() + ":" +
+                    SeedHash.Stable(record.Id ?? record.Text).ToString("x8"), "recent_life",
+                    "optionally mention this simulated recent-life detail in first person, casually and without adding facts; silence is fine",
+                    27.0, IdentitySchema.Bound(record.Text, 420), "simulated recent life", 22, 0.0,
+                    observed.ToUniversalTime(), DateTime.MaxValue, new string[] { sim.Name });
+            }
+            return null;
+        }
+
+        internal static AmbientSeedCandidate BuildAmbientChatCandidate(IList<RecentSocialLine> recent, DateTime now)
+        {
+            if (recent == null) return null;
+            for (int i = recent.Count - 1; i >= 0; i--)
+            {
+                RecentSocialLine line = recent[i];
+                if (line == null || !line.Public || string.IsNullOrWhiteSpace(line.Text)) continue;
+                if (line.Channel != RecentChatChannel.Say && line.Channel != RecentChatChannel.Shout) continue;
+                if ((now - line.Utc).TotalSeconds > 90.0) continue;
+                string heard = (string.IsNullOrWhiteSpace(line.Speaker) ? "Someone" : line.Speaker) +
+                    " was heard in " + line.Channel.ToString().ToLowerInvariant() + " chat saying: " + line.Text;
+                return new AmbientSeedCandidate("ambient_chat:" + SeedHash.Stable(heard).ToString("x8"),
+                    "ambient_chat", "privately discuss the HEARD public-chat line if it is interesting; never reply publicly and never treat its claims as verified world state",
+                    29.0, IdentitySchema.Bound(heard, 360), "HEARD ambient chat (unverified content)", 20, 0.15,
+                    line.Utc, line.Utc.AddSeconds(90.0), null);
+            }
+            return null;
+        }
+
+        private static void AddStructuredMemorySeeds(List<AmbientSeedCandidate> seeds, SimSnapshot owner,
+            IList<StructuredMemoryRecord> records, string kind, double baseScore, string contextText, bool requireRelevance, DateTime now)
+        {
+            if (records == null || seeds == null || owner == null) return;
+            int start = Math.Max(0, records.Count - 8);
+            for (int i = records.Count - 1; i >= start; i--)
+            {
+                StructuredMemoryRecord record = records[i];
+                if (record == null || !MemoryKnowledgePolicy.CanUse(record, owner)) continue;
+                bool relevant = StructuredRecordRelevant(record, contextText);
+                if ((requireRelevance || record.Pinned) && !relevant) continue;
+                if (!relevant && record.Importance < 65) continue;
+
+                List<string> known = EligibleKnownSpeakers(record, owner);
+                if (known.Count == 0) continue;
+                string id = !string.IsNullOrWhiteSpace(record.Id) ? record.Id : SeedHash.Stable(record.Text).ToString("x8");
+                string source = record.Pinned || string.Equals(kind, "pinned", StringComparison.OrdinalIgnoreCase)
+                    ? "authored pinned memory" : (record.Authored ? "authored shared memory" : "verified learned memory");
+                seeds.Add(new AmbientSeedCandidate("memory:" + kind + ":" + id, "memory",
+                    "briefly reference this specific known memory because it is relevant now; do not add facts or claim an emotion as verified",
+                    baseScore, IdentitySchema.Bound(record.Text, 520), source, Math.Max(45, record.Importance), 0.0, now, DateTime.MaxValue, known));
+            }
+        }
+
+        private static List<string> EligibleKnownSpeakers(StructuredMemoryRecord record, SimSnapshot owner)
+        {
+            List<string> result = new List<string>();
+            if (record != null && record.KnownBy != null && record.KnownBy.Count > 0)
+            {
+                for (int i = 0; i < record.KnownBy.Count; i++)
+                {
+                    string value = record.KnownBy[i];
+                    if (string.IsNullOrWhiteSpace(value) || string.Equals(value, "player", StringComparison.OrdinalIgnoreCase)) continue;
+                    bool exists = false;
+                    for (int j = 0; j < result.Count; j++) if (string.Equals(result[j], value, StringComparison.OrdinalIgnoreCase)) { exists = true; break; }
+                    if (!exists) result.Add(value.Trim());
+                }
+            }
+            else if (record != null && !record.Authored && owner != null && !string.IsNullOrWhiteSpace(owner.Name)) result.Add(owner.Name);
+            return result;
+        }
+
+        private static bool StructuredRecordRelevant(StructuredMemoryRecord record, string contextText)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(contextText)) return false;
+            if (!string.IsNullOrWhiteSpace(record.Subject) && IdentityContextPolicy.IsRelevant(record.Subject, contextText)) return true;
+            if (record.Topics != null)
+                for (int i = 0; i < record.Topics.Count; i++)
+                    if (!string.IsNullOrWhiteSpace(record.Topics[i]) && IdentityContextPolicy.IsRelevant(record.Topics[i], contextText)) return true;
+            return IdentityContextPolicy.IsRelevant(record.Text, contextText);
+        }
+
+        private static void AddRecentCompetitiveEventSeed(List<AmbientSeedCandidate> seeds, SimSnapshot sim, SimMemory memory,
+            long opportunityId, DateTime now)
+        {
+            if (memory == null || memory.RecentEvents == null || seeds == null) return;
+            int start = Math.Max(0, memory.RecentEvents.Count - 10);
+            for (int i = memory.RecentEvents.Count - 1; i >= start; i--)
+            {
+                MemoryEvent evt = memory.RecentEvents[i];
+                if (evt == null || !IsCompetitiveEventType(evt.type) || string.IsNullOrWhiteSpace(evt.text)) continue;
+                DateTime utc;
+                if (!DateTime.TryParse(evt.utc, out utc)) continue;
+                if (Math.Abs((now.ToUniversalTime() - utc.ToUniversalTime()).TotalHours) > 2.0) continue;
+                string key = "competitive:" + SeedHash.Stable((evt.type ?? string.Empty) + "|" + evt.text).ToString("x8");
+                seeds.Add(new AmbientSeedCandidate(key, "memory",
+                    "react to this one verified competitive episode; the event is fact, but any emotion or interpretation is only your present opinion",
+                    42.0, IdentitySchema.Bound(evt.text, 420), "verified competitive event:" + (evt.type ?? "event"), Math.Max(70, evt.importance), 0.0,
+                    utc.ToUniversalTime(), now.AddMinutes(15), new string[] { sim.Name }));
+                return; // one factual episode per memory/speaker per opportunity
+            }
+        }
+
+        private static bool IsCompetitiveEventType(string type)
+        {
+            string t = (type ?? string.Empty).ToLowerInvariant();
+            return t.IndexOf("duel") >= 0 || t.IndexOf("pvp") >= 0 || t.IndexOf("nemesis") >= 0;
         }
 
         private static string PickBounded(List<string> items, long opportunityId, int maxRecent)
@@ -1356,17 +1696,22 @@ namespace ErenshorDeepSims
             StringBuilder sb = new StringBuilder();
             sb.Append("#").Append(d.OpportunityId).Append(" ")
                 .Append(d.Utc.ToLocalTime().ToString("HH:mm:ss"))
-                .Append(" context=").Append(d.Mode)
-                .Append(" silence=").Append(d.SilenceScore.ToString("0.#"))
-                .Append(" -> ").Append(d.SilenceWon ? "SILENCE" : (d.SelectedTopicKey + "/" + d.SelectedSpeaker))
+                .Append(" opportunity=ambient")
+                .Append(" mode/context=").Append(d.Mode)
+                .Append(" silenceScore=").Append(d.SilenceScore.ToString("0.#"))
+                .Append(" selected=").Append(d.SilenceWon ? "SILENCE" : (d.SelectedTopicKey + "/" + d.SelectedSpeaker))
+                .Append(" selectedSource=").Append(string.IsNullOrWhiteSpace(d.SelectedSource) ? "none" : d.SelectedSource)
+                .Append(" selectedScore=").Append(d.SelectedScore.ToString("0.#"))
                 .Append(" [").Append(d.Outcome).Append("]");
             int listed = 0;
             for (int i = 0; i < d.Candidates.Count && listed < 5; i++, listed++)
             {
                 AmbientSeedScore s = d.Candidates[i];
-                sb.AppendLine().Append("    ").Append(s.TopicKey);
-                if (s.Excluded) sb.Append(" excluded (").Append(s.ExcludedReason).Append(")");
-                else sb.Append(" score=").Append(s.Score.ToString("0.#")).Append(" speaker=").Append(s.Speaker);
+                sb.AppendLine().Append("    key=").Append(s.TopicKey)
+                    .Append(" source=").Append(string.IsNullOrWhiteSpace(s.Source) ? "ambient" : s.Source)
+                    .Append(" speaker=").Append(string.IsNullOrWhiteSpace(s.Speaker) ? "none" : s.Speaker);
+                if (s.Excluded) sb.Append(" score=excluded exclusion=").Append(s.ExcludedReason);
+                else sb.Append(" score=").Append(s.Score.ToString("0.#")).Append(" exclusion=none");
             }
             if (!string.IsNullOrEmpty(d.Reason)) sb.AppendLine().Append("    reason: ").Append(d.Reason);
             return sb.ToString();

@@ -1,0 +1,12 @@
+src/SimMemoryPersistence.cs
+src/SimMemoryPersistenceDeterministicTests.cs
+src/MemoryStore.cs
+src/RelationshipModel.cs
+src/CognitionObservabilityDeterministicTests.cs
+src/IdentityContextDeterministicTests.cs
+src/DeepSimsPlugin.cs
+tests/RUN_DETERMINISTIC_TESTS.ps1
+tests/StandaloneRegressionMain.cs
+DEEPSIMS_082_STRUCTURED_PERSISTENCE_HANDOFF.md
+DEEPSIMS_082_STRUCTURED_PERSISTENCE_CHANGED_FILES.txt
+DEEPSIMS_082_STRUCTURED_PERSISTENCE_SHA256SUMS.txt

@@ -81,6 +81,22 @@ namespace ErenshorDeepSims
                 Add(results, "TEST5/different speaker is never blocked by this rule", allowedDifferentSpeaker);
             }
 
+            // Player priority remains bounded: it suppresses unrelated autonomous admission during a
+            // direct exchange, then releases the floor after the quiet window.
+            {
+                DateTime direct = new DateTime(2026, 8, 22, 12, 0, 0, DateTimeKind.Utc);
+                bool blocksDuringExchange = ConversationTurnGuard.DirectConversationOwnsTurn(
+                    direct.Ticks, direct.AddSeconds(5).Ticks, 12.0);
+                bool releasesAfterWindow = !ConversationTurnGuard.DirectConversationOwnsTurn(
+                    direct.Ticks, direct.AddSeconds(13).Ticks, 12.0);
+                bool noPriorDirectTurnAllowsBanter = !ConversationTurnGuard.DirectConversationOwnsTurn(
+                    0L, direct.Ticks, 12.0);
+                Add(results, "priority/direct player exchange suppresses conflicting autonomous admission",
+                    blocksDuringExchange);
+                Add(results, "priority/non-conflicting autonomous banter resumes after bounded quiet window",
+                    releasesAfterWindow && noPriorDirectTurnAllowsBanter);
+            }
+
             // TEST 6: MaxAutonomousThreadReplies is a hard upper bound - verify a thread can stop early
             // (not always fill to the cap) and can never exceed the cap regardless of hook strength.
             {
@@ -302,6 +318,22 @@ namespace ErenshorDeepSims
                 bool invalidatedLineIsNowStale = ConversationTurnGuard.IsStale(invalidated[0].ConversationGeneration, liveGeneration);
                 Add(results, "TEST20/shutdown clears queued autonomous output and invalidates its generation",
                     queuedBeforeShutdown && queueEmptiedByShutdown && invalidatedLineIsNowStale);
+            }
+
+            // Unsupported generated quest-guide specificity is not game truth. Retrieved/verified
+            // support may still authorize the same locator through the ordinary grounding boundary.
+            {
+                SimMemory plainMemory = new SimMemory(); plainMemory.Normalize(); plainMemory.Name = "Cyndara";
+                WorldSnapshot plainWorld = new WorldSnapshot();
+                string reason;
+                bool inventedRejected = !GroundingGuard.IsGrounded(
+                    "I thought it was the dungeon map quest, check page 4.", plainMemory, plainWorld,
+                    string.Empty, null, out reason);
+                bool supportedAllowed = GroundingGuard.IsGrounded(
+                    "check page 4 for the dungeon map quest", plainMemory, plainWorld,
+                    string.Empty, "The dungeon map quest instructions say to check page 4.", out reason);
+                Add(results, "grounding/unsupported generated quest-page guidance is rejected",
+                    inventedRejected && supportedAllowed);
             }
 
             // TEST 21: no visible line can be displayed after shutdown generation invalidation, even for

@@ -32,11 +32,24 @@ namespace ErenshorDeepSims
             RunEventConversationTests();
             RunConversationSeedTests();
             RunOutputTests();
+            AddRange(DialogueControlDeterministicTests.Run());
+            AddRange(NemesisRoleContextDeterministicTests.Run());
             RunExternalNewsTests();
             RunExternalNewsProviderTests();
             RunPersistenceTests();
             Results.Add("[DeepSims Regression] SUMMARY: " + _passed + " PASS, " + _failed + " FAIL, " + (_passed + _failed) + " total.");
             return new List<string>(Results);
+        }
+
+        private static void AddRange(List<string> lines)
+        {
+            if (lines == null) return;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = lines[i] ?? string.Empty;
+                Results.Add(line);
+                if (line.IndexOf(" FAIL]", StringComparison.Ordinal) >= 0) _failed++; else _passed++;
+            }
         }
 
         internal static int RunToConsole()
@@ -140,6 +153,13 @@ namespace ErenshorDeepSims
             AddMemory("encounter", "quiet period does not finalize too early", TestQuietPeriod);
             AddMemory("encounter", "previous fight is most recently completed", TestSequentialEncounters);
             AddMemory("encounter", "encounter retains start zone through zone transition", TestZoneTransition);
+            AddMemory("encounter", "menu/loading cannot start a durable outing", TestMenuCannotStartOuting);
+            AddMemory("encounter", "real zone is admitted only after gameplay readiness", TestGameplayReadinessBoundary);
+            AddMemory("encounter", "multi-zone outing does not attribute whole duration to one zone", TestMultiZoneSummary);
+            AddMemory("encounter", "legacy pseudo-location is removed without guessing a zone", TestLegacyOutingSanitization);
+            AddMemory("encounter", "PvP semantic ownership suppresses generic close-call and kill proxies", TestCompetitiveCombatIsolation);
+            AddMemory("encounter", "Practice Duel ownership suppresses generic lethal proxies", TestPracticeDuelIsolation);
+            AddMemory("encounter", "ordinary native low-health state remains a close call", TestOrdinaryCloseCall);
             AddMemory("encounter", "party growth does not split active outing", TestPartyGrowth);
         }
 
@@ -179,7 +199,7 @@ namespace ErenshorDeepSims
             Add("output", "natural hypothetical follow-up remains relevant", delegate { string reason; return GroundingGuard.IsDirectReplyRelevant("could you imagine getting sucked into this game?", "what class would you be?", out reason) ? null : reason; });
             Add("output", "generic what-about-me deflection is rejected", delegate { string reason; return !GroundingGuard.IsDirectReplyRelevant("what is everyone's favorite music?", "what about me, then!", out reason) && reason.Contains("counter-question") ? null : "preference deflection accepted"; });
             Add("intent", "music preference fallback gives an actual taste", delegate { string reply; return SocialTemplates.TryRenderSubjectiveReply("what is everyone's favorite music?", NewSim(), PartyReplyIntent.Opinion, out reply) && (reply.IndexOf("instrumental", StringComparison.OrdinalIgnoreCase) >= 0 || reply.IndexOf("soundtrack", StringComparison.OrdinalIgnoreCase) >= 0 || reply.IndexOf("metal", StringComparison.OrdinalIgnoreCase) >= 0 || reply.IndexOf("loud", StringComparison.OrdinalIgnoreCase) >= 0) ? null : "generic music fallback: " + reply; });
-            Add("intent", "uncertainty cannot answer a subjective question", delegate { return GroundingGuard.IsSubjectiveDeflection(PartyReplyIntent.Opinion, "not too sure about that") ? null : "subjective uncertainty accepted"; });
+            Add("intent", "casual uncertainty can answer a subjective question", delegate { return !GroundingGuard.IsSubjectiveDeflection(PartyReplyIntent.Opinion, "not too sure about that") ? null : "normal uncertainty rejected"; });
             Add("intent", "uncertainty remains valid for an unknown fact", delegate { return !GroundingGuard.IsSubjectiveDeflection(PartyReplyIntent.FactualGameQuestion, "not too sure about that") ? null : "factual uncertainty blocked"; });
             Add("intent", "unknown news fallback is specific and grounded", delegate { string reply = SocialTemplates.RenderUnknownFactReply("heard any news?", NewSim()); return GroundingGuard.HasUncertaintyLanguage(reply) && reply.IndexOf("that one", StringComparison.OrdinalIgnoreCase) < 0 ? null : "weak news fallback: " + reply; });
             Add("intent", "immersion hypothetical fallback takes a stance", delegate { string reply; return SocialTemplates.TryRenderSubjectiveReply("could you imagine getting sucked into this game?", NewSim(), PartyReplyIntent.SocialBanter, out reply) && !GroundingGuard.HasUncertaintyLanguage(reply) ? null : "immersion deflection: " + reply; });
@@ -367,7 +387,7 @@ namespace ErenshorDeepSims
             {
                 FakeNewsTransport transport = new FakeNewsTransport { Handler = (url, timeout, accept) => IsRss(url) ? SampleRssXml : SampleGdeltJson };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "primary-succeeds");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 if (!bundle.Combined.Found) return "expected found result";
                 return transport.CallCount == 1 ? null : "expected exactly 1 provider call, got " + transport.CallCount;
             });
@@ -376,7 +396,7 @@ namespace ErenshorDeepSims
             {
                 FakeNewsTransport transport = new FakeNewsTransport { Handler = (url, timeout, accept) => IsRss(url) ? "<rss><channel></channel></rss>" : SampleGdeltJson };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "zero-then-fallback");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 if (!bundle.Combined.Found) return "expected fallback to find results";
                 return transport.CallCount == 2 ? null : "expected 2 provider calls, got " + transport.CallCount;
             });
@@ -389,7 +409,7 @@ namespace ErenshorDeepSims
                     return SampleGdeltJson;
                 } };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "timeout-then-fallback");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 if (!bundle.Combined.Found) return "expected fallback to find results after timeout";
                 if (bundle.Diagnostics == null || bundle.Diagnostics.IndexOf("timed out", StringComparison.OrdinalIgnoreCase) < 0)
                     return "diagnostics did not record the timeout: " + bundle.Diagnostics;
@@ -407,7 +427,7 @@ namespace ErenshorDeepSims
                     }
                 };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "429-then-fallback");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 return bundle.Combined.Found ? null : "expected fallback to find results after HTTP 429";
             });
 
@@ -422,7 +442,7 @@ namespace ErenshorDeepSims
                     }
                 };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "5xx-then-fallback");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 return bundle.Combined.Found ? null : "expected fallback to find results after HTTP 5xx";
             });
 
@@ -430,7 +450,7 @@ namespace ErenshorDeepSims
             {
                 FakeNewsTransport transport = new FakeNewsTransport { Handler = (url, timeout, accept) => IsRss(url) ? "not xml at all {{{" : SampleGdeltJson };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "malformed-then-fallback");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 return bundle.Combined.Found ? null : "expected fallback to find results after malformed primary response";
             });
 
@@ -448,7 +468,7 @@ namespace ErenshorDeepSims
             {
                 FakeNewsTransport transport = new FakeNewsTransport { Handler = (url, timeout, accept) => SampleRssXml };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "rss-parse");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 if (bundle.Items.Count != 1) return "expected 1 item, got " + bundle.Items.Count;
                 ExternalNewsItem item = bundle.Items[0];
                 if (item.Headline != "NASA delays Artemis launch") return "headline='" + item.Headline + "'";
@@ -461,7 +481,7 @@ namespace ErenshorDeepSims
             {
                 FakeNewsTransport transport = new FakeNewsTransport { Handler = (url, timeout, accept) => IsRss(url) ? "<rss><channel></channel></rss>" : SampleGdeltJson };
                 ExternalNewsClient client = new ExternalNewsClient(null, transport);
-                ExternalNewsBundle bundle = RunSearch(client, "gdelt-parse");
+                ExternalNewsBundle bundle = RunSearch(client, "NASA");
                 if (bundle.Items.Count != 1) return "expected 1 item, got " + bundle.Items.Count;
                 ExternalNewsItem item = bundle.Items[0];
                 if (item.Headline != "NASA delays Artemis launch") return "headline='" + item.Headline + "'";
@@ -698,6 +718,124 @@ namespace ErenshorDeepSims
             clock.Advance(16);
             EncounterSnapshot encounter = telemetry.Snapshot().LastCompletedEncounter;
             return encounter != null && encounter.Zone == "Brakke" ? null : "zone was not frozen at encounter start";
+        }
+
+        private static string TestMenuCannotStartOuting()
+        {
+            Clock clock = new Clock(DateTime.UtcNow);
+            SessionTelemetry telemetry = NewTelemetry(clock);
+            WorldSnapshot world = NewWorld(null);
+            world.Scene = "Menu";
+            telemetry.Observe(world, Party(), true);
+            if (telemetry.Snapshot().Active) return "Menu started an outing";
+            world.Scene = "Hidden Hills";
+            telemetry.Observe(world, Party(), true);
+            OutingSnapshot snap = telemetry.Snapshot();
+            return snap.Active && Contains(snap.Facts, "Hidden Hills") && !Contains(snap.Facts, "Menu")
+                ? null : "first verified gameplay location was not retained cleanly";
+        }
+
+        private static string TestMultiZoneSummary()
+        {
+            string dir = NewTempDirectory();
+            try
+            {
+                Clock clock = new Clock(new DateTime(2026, 8, 22, 12, 0, 0, DateTimeKind.Utc));
+                MemoryStore store = new MemoryStore(dir, null);
+                SessionTelemetry telemetry = new SessionTelemetry(null, store, delegate { return clock.Now; });
+                SimSnapshot sim = NewSim();
+                List<SimSnapshot> party = new List<SimSnapshot> { sim };
+                WorldSnapshot world = NewWorld(null);
+                world.Scene = "Hidden Hills";
+                telemetry.Observe(world, party, true);
+                for (int i = 0; i < 7; i++) { clock.Advance(10); telemetry.Observe(world, party, true); }
+                world.Scene = "Azure Cove";
+                for (int i = 0; i < 7; i++) { clock.Advance(10); telemetry.Observe(world, party, true); }
+                clock.Advance(1);
+                telemetry.Observe(world, new List<SimSnapshot>(), true);
+                SimMemory memory = store.LoadForPrompt(sim);
+                store.Shutdown();
+                if (memory.OutingSummaries.Count != 1) return "outing summary missing";
+                string summary = memory.OutingSummaries[0];
+                return summary.IndexOf("across multiple verified areas", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    summary.IndexOf("minutes in Hidden Hills", StringComparison.OrdinalIgnoreCase) < 0 &&
+                    summary.IndexOf("minutes in Azure Cove", StringComparison.OrdinalIgnoreCase) < 0
+                    ? null : "whole duration received a stale/final zone: " + summary;
+            }
+            finally { DeleteTempDirectory(dir); }
+        }
+
+        private static string TestGameplayReadinessBoundary()
+        {
+            Clock clock = new Clock(DateTime.UtcNow);
+            SessionTelemetry telemetry = NewTelemetry(clock);
+            WorldSnapshot world = NewWorld(null);
+            world.Scene = "Hidden Hills";
+            telemetry.Observe(world, Party(), false);
+            if (telemetry.Snapshot().Active) return "real scene started before character readiness";
+            telemetry.Observe(world, Party(), true);
+            return telemetry.Snapshot().Active && telemetry.Snapshot().CurrentZone == "Hidden Hills"
+                ? null : "ready real scene did not start outing";
+        }
+
+        private static string TestLegacyOutingSanitization()
+        {
+            string legacy = "Grouped for about 37 minutes in Menu. The group had 1 close call.";
+            string safe = VerifiedOutingHistoryPolicy.SanitizeForPrompt(legacy);
+            return safe == "Grouped for about 37 minutes. The group had 1 close call." &&
+                safe.IndexOf("Hidden Hills", StringComparison.OrdinalIgnoreCase) < 0
+                ? null : "legacy summary was not conservatively sanitized: " + safe;
+        }
+
+        private static string TestCompetitiveCombatIsolation()
+        {
+            Clock clock = new Clock(DateTime.UtcNow);
+            SessionTelemetry telemetry = NewTelemetry(clock);
+            WorldSnapshot world = NewWorld(null);
+            telemetry.Observe(world, Party(), true);
+            telemetry.ObserveCompetitiveCombatEvent("pvp", "pvp_accepted", string.Empty);
+            if (!telemetry.ShouldSuppressGenericCombatEvent("player_death") ||
+                telemetry.ShouldSuppressGenericCombatEvent("pvp_match_completed")) return "generic/semantic event classification is wrong";
+            world.Player.HpPercent = 10f;
+            clock.Advance(1);
+            telemetry.Observe(world, Party(), true);
+            telemetry.RecordKill("PvP Proxy", "Phanty");
+            telemetry.RecordObservedEvent("player_death", "The player died.");
+            OutingSnapshot snap = telemetry.Snapshot();
+            if (snap.TotalKills != 0 || !string.Equals(snap.Mood, "normal", StringComparison.OrdinalIgnoreCase) ||
+                Contains(snap.Facts, "close call") || Contains(snap.Facts, "died")) return "competitive proxies leaked into generic telemetry";
+            telemetry.ObserveCompetitiveCombatEvent("pvp", "pvp_match_completed", string.Empty);
+            clock.Advance(13);
+            return !telemetry.ShouldSuppressGenericCombatEvent("player_death") ? null : "terminal suppression did not expire";
+        }
+
+        private static string TestPracticeDuelIsolation()
+        {
+            Clock clock = new Clock(DateTime.UtcNow);
+            SessionTelemetry telemetry = NewTelemetry(clock);
+            WorldSnapshot world = NewWorld(null);
+            telemetry.Observe(world, Party(), true);
+            telemetry.ObserveCompetitiveCombatEvent("duel", "duel_started", string.Empty);
+            world.Player.HpPercent = 10f;
+            clock.Advance(1);
+            telemetry.Observe(world, Party(), true);
+            telemetry.RecordKill("Practice Proxy", "Phanty");
+            OutingSnapshot snap = telemetry.Snapshot();
+            return snap.TotalKills == 0 && !Contains(snap.Facts, "close call") && !Contains(snap.Facts, "Practice Proxy")
+                ? null : "Practice Duel leaked into generic lethal telemetry";
+        }
+
+        private static string TestOrdinaryCloseCall()
+        {
+            Clock clock = new Clock(DateTime.UtcNow);
+            SessionTelemetry telemetry = NewTelemetry(clock);
+            WorldSnapshot world = NewWorld(null);
+            telemetry.Observe(world, Party(), true);
+            world.Player.HpPercent = 10f;
+            clock.Advance(1);
+            telemetry.Observe(world, Party(), true);
+            return Contains(telemetry.Snapshot().Facts, "low-health close call")
+                ? null : "verified ordinary HP threshold no longer records a close call";
         }
 
         private static string TestPartyGrowth()

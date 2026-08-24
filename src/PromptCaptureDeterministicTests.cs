@@ -17,6 +17,7 @@ namespace ErenshorDeepSims
             try
             {
                 CaptureOffWritesNothing(root);
+                BackgroundStagesRespectCapturePolicyAndSerialize(root);
                 CaptureOnWritesBoundedSemanticPacket(root);
                 ExactRequestMatchesSubmittedBody(root);
                 SingleModelInvariantVisibleInPacket(root);
@@ -56,6 +57,38 @@ namespace ErenshorDeepSims
             PromptCaptureScope.RecordFinal(true, "LLM", "should not be recorded");
             bool nothingOnDisk = !Directory.Exists(dir) || Directory.GetFiles(dir).Length == 0;
             Add("capture off writes no files", nothingOnDisk, "files were written while disabled");
+        }
+
+        private static void BackgroundStagesRespectCapturePolicyAndSerialize(string root)
+        {
+            string[] stages = { "context_pulse", "autonomous_opener", "session_reflection", "social_curation" };
+            PromptCapture.ResetForTests();
+            bool allOff = true;
+            for (int i = 0; i < stages.Length; i++)
+                if (PromptCaptureScope.Begin(stages[i], "background") != null) allOff = false;
+            Add("new background scopes remain disabled with capture off", allOff, "a background scope bypassed opt-in policy");
+
+            StartSession(root, "background-stages", 20, true);
+            bool allSerialized = true;
+            for (int i = 0; i < stages.Length; i++)
+            {
+                PromptCaptureLease lease = PromptCaptureScope.Begin(stages[i], "background");
+                if (lease == null) { allSerialized = false; continue; }
+                PromptCaptureScope.DescribeBackground(i == 3 ? "Curation" : i == 2 ? "Reflection" : "Autonomous",
+                    7, 11, "event-42", "correlation-42");
+                PromptCaptureScope.DescribeSeed("verified_event", "topic_key", "campmaster", string.Empty,
+                    string.Empty, true, false, false);
+                PromptCaptureScope.RecordQueueAccepted(i == 1);
+                string json = PromptCapturePacketSerializer.BuildSemanticRequestJson(lease.Packet);
+                string result = PromptCapturePacketSerializer.BuildResultJson(lease.Packet);
+                allSerialized = allSerialized && json.Contains("\"stage\": \"" + stages[i] + "\"") &&
+                    json.Contains("\"lane\":") && json.Contains("\"conversationGeneration\": 11") &&
+                    json.Contains("\"verifiedSourceId\": \"event-42\"") &&
+                    result.Contains("\"visibilityDisposition\":");
+                lease.Dispose();
+            }
+            Add("new background scopes serialize through the existing packet format", allSerialized,
+                "stage or lifecycle metadata missing");
         }
 
         // 2. capture ON => semantic request packet contains the expected bounded fields.

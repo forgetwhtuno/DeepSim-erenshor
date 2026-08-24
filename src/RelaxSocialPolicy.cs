@@ -54,7 +54,7 @@ namespace ErenshorDeepSims
 
         internal static string BuildSituation(string topicId, string scene, string verifiedOutingFact)
         {
-            string prefix = "RELAX SOCIAL DOWNTIME: the player explicitly chose Relax with the current visible party";
+            string prefix = "RELAX SOCIAL DOWNTIME: the current visible party is safely relaxing together";
             if (!string.IsNullOrWhiteSpace(scene)) prefix += " in " + scene;
             prefix += ". This is social downtime, not a hunt camp, pull, route, combat order, or group decision. ";
 

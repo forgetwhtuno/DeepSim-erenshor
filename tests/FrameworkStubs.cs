@@ -41,6 +41,7 @@ namespace ErenshorDeepSims
 {
     internal sealed class DeepSimsPlugin
     {
+        internal static DeepSimsPlugin Instance;
         internal sealed class BoolConfig { internal bool Value = true; }
         internal sealed class NumberConfig { internal double Value = 60.0; }
 
@@ -59,6 +60,7 @@ namespace ErenshorDeepSims
         internal bool TryAdmitAutonomousOpportunity(string type, SocialPriority priority, string semanticKey, bool combat, out string reason) { reason = string.Empty; return true; }
         internal string DescribeSocialBudget() { return "test budget"; }
         internal bool WillUseLlmForAutonomousEvent(string type) { return false; }
+        internal static void LogNemesisRoleDiagnostic(string value) { }
     }
 
     internal static class SimContextReader

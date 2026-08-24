@@ -1,0 +1,9 @@
+src/DialogueControl.cs
+src/DeepSimsPlugin.cs
+src/RoleplayPerspective.cs
+src/GroupMessageQueue.cs
+src/PromptCapturePacket.cs
+src/PromptCaptureScope.cs
+src/DeterministicRegressionTests.cs
+tests/RUN_DETERMINISTIC_TESTS.ps1
+DEEPSIMS_082_CONTROL_SENTINEL_CORRELATION_HANDOFF.md

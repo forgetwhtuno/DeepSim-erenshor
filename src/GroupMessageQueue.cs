@@ -38,6 +38,13 @@ namespace ErenshorDeepSims
         internal int EligibleSpeakerCount;
         internal string SoftPreferenceTopicKey = string.Empty;
         internal ConnectedBanterPlan ConnectedBanter;
+        internal List<string> KnownSocialSubjects = new List<string>();
+        internal PromptCapturePacket PromptCapturePacket;
+        internal long CorrelationRequestId;
+        internal int CorrelationAttempt;
+        internal long CorrelationThreadId;
+        internal string CorrelationCandidateHash = string.Empty;
+        internal string CorrelationRequestType = string.Empty;
     }
 
     internal class GroupMessageQueue
@@ -49,7 +56,10 @@ namespace ErenshorDeepSims
             int conversationGeneration = -1, string diagnosticContext = null, long partyRequestId = 0,
             long membershipVersion = -1, string speakerActorId = null, string generationPath = null,
             DateTime partySnapshotCapturedUtc = default(DateTime), int eligibleSpeakerCount = 0,
-            string softPreferenceTopicKey = null, ConnectedBanterPlan connectedBanter = null)
+            string softPreferenceTopicKey = null, ConnectedBanterPlan connectedBanter = null,
+            IList<string> knownSocialSubjects = null, PromptCapturePacket promptCapturePacket = null,
+            long correlationRequestId = 0, int correlationAttempt = 0, long correlationThreadId = 0,
+            string correlationCandidateHash = null, string correlationRequestType = null)
         {
             if (string.IsNullOrWhiteSpace(speaker) || string.IsNullOrWhiteSpace(text)) return;
             lock (_lock)
@@ -70,6 +80,15 @@ namespace ErenshorDeepSims
                 item.EligibleSpeakerCount = Math.Max(0, eligibleSpeakerCount);
                 item.SoftPreferenceTopicKey = softPreferenceTopicKey ?? string.Empty;
                 item.ConnectedBanter = connectedBanter;
+                item.PromptCapturePacket = promptCapturePacket;
+                item.CorrelationRequestId = correlationRequestId;
+                item.CorrelationAttempt = correlationAttempt;
+                item.CorrelationThreadId = correlationThreadId;
+                item.CorrelationCandidateHash = correlationCandidateHash ?? string.Empty;
+                item.CorrelationRequestType = correlationRequestType ?? string.Empty;
+                if (knownSocialSubjects != null)
+                    for (int i = 0; i < knownSocialSubjects.Count; i++)
+                        if (!string.IsNullOrWhiteSpace(knownSocialSubjects[i])) item.KnownSocialSubjects.Add(knownSocialSubjects[i].Trim());
                 _items.Add(item);
                 _items.Sort(delegate(ScheduledGroupMessage a, ScheduledGroupMessage b) { return a.DueUtc.CompareTo(b.DueUtc); });
             }

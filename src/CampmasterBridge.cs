@@ -5,6 +5,24 @@ using System.Reflection;
 
 namespace ErenshorDeepSims
 {
+    internal static class CampLivingEventSemantics
+    {
+        internal static string FactualSummary(CampEventFact evt)
+        {
+            if (evt == null) return string.Empty;
+            if (!string.IsNullOrWhiteSpace(evt.Detail)) return evt.Detail.Trim();
+            string type = (evt.Type ?? string.Empty).Trim().ToLowerInvariant();
+            if (type == "camp_minor_disagreement")
+            {
+                string who = string.IsNullOrWhiteSpace(evt.ParticipantName) ? "A party member" : evt.ParticipantName.Trim();
+                // A one-name payload means that participant disagreed with the camp group. It does
+                // not establish a route, plan, meal, or other concrete subject.
+                return who + " had a minor disagreement with the group.";
+            }
+            return type.Replace('_', ' ');
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Optional, reflection-only, read-only bridge to the standalone Erenshor
     // Campmaster mod (ErenshorCampmaster.CampmasterApi). Deep Sims takes no
@@ -21,6 +39,8 @@ namespace ErenshorDeepSims
     {
         private const string ApiTypeName = "ErenshorCampmaster.CampmasterApi";
         private const int SupportedSchemaVersion = 3;
+        private const int SupportedSocialContractVersion = 1;
+        private const int SupportedLivingContractVersion = 1;
 
         private static readonly object ResolveLock = new object();
         private static volatile bool _resolved;
@@ -28,8 +48,13 @@ namespace ErenshorDeepSims
         private static PropertyInfo _isActiveProperty;
         private static MethodInfo _snapshotMethod;
         private static MethodInfo _eventsMethod;
+        private static MethodInfo _relaxEventsMethod;
+        private static MethodInfo _livingEventsMethod;
+        private static MethodInfo _socialContextMethod;
 
         private static long _lastSequence;
+        private static long _lastRelaxSequence;
+        private static long _lastLivingSequence;
 
         static CampmasterBridge()
         {
@@ -55,7 +80,12 @@ namespace ErenshorDeepSims
                 _isActiveProperty = null;
                 _snapshotMethod = null;
                 _eventsMethod = null;
+                _relaxEventsMethod = null;
+                _livingEventsMethod = null;
+                _socialContextMethod = null;
                 _lastSequence = 0;
+                _lastRelaxSequence = 0;
+                _lastLivingSequence = 0;
             }
         }
 
@@ -87,6 +117,14 @@ namespace ErenshorDeepSims
             catch { return null; }
         }
 
+        internal static Dictionary<string, string> ReadCurrentSocialContext()
+        {
+            EnsureResolved();
+            if (_socialContextMethod == null) return null;
+            try { return _socialContextMethod.Invoke(null, null) as Dictionary<string, string>; }
+            catch { return null; }
+        }
+
         // Advances the internal cursor. Call at most once per poll cycle.
         internal static List<CampEventFact> ReadNewEvents()
         {
@@ -100,6 +138,55 @@ namespace ErenshorDeepSims
                 result = ParseEvents(rows);
                 for (int i = 0; i < result.Count; i++)
                     if (result[i].Sequence > _lastSequence) _lastSequence = result[i].Sequence;
+            }
+            catch { }
+            return result;
+        }
+
+        internal static List<CampEventFact> ReadNewRelaxEvents()
+        {
+            return ReadNewEventsFrom(_relaxEventsMethod, ref _lastRelaxSequence);
+        }
+
+        internal static List<CampEventFact> ReadNewLivingEvents()
+        {
+            List<CampEventFact> events = ReadNewEventsFrom(_livingEventsMethod, ref _lastLivingSequence);
+            if (events.Count == 0) return events;
+
+            // Campmaster living rows intentionally carry sessionId but not zone.  Borrow the
+            // current social-context zone only when the current sessionId proves it is the same
+            // session; otherwise location stays unknown rather than becoming stale cross-zone fact.
+            Dictionary<string, string> context = ReadCurrentSocialContext();
+            string contextSession = Get(context, "sessionId");
+            string contextZone = Get(context, "zone");
+            for (int i = 0; i < events.Count; i++)
+            {
+                CampEventFact evt = events[i];
+                if (evt == null || !string.IsNullOrWhiteSpace(evt.Zone)) continue;
+                if (!string.IsNullOrWhiteSpace(evt.SessionId) &&
+                    !string.IsNullOrWhiteSpace(contextSession) &&
+                    string.Equals(evt.SessionId, contextSession, StringComparison.OrdinalIgnoreCase))
+                    evt.Zone = contextZone;
+            }
+            return events;
+        }
+
+        private static string Get(Dictionary<string, string> data, string key)
+        {
+            string value;
+            return data != null && data.TryGetValue(key, out value) ? value : null;
+        }
+
+        private static List<CampEventFact> ReadNewEventsFrom(MethodInfo method, ref long cursor)
+        {
+            List<CampEventFact> result = new List<CampEventFact>();
+            EnsureResolved();
+            if (method == null) return result;
+            try
+            {
+                object raw = method.Invoke(null, new object[] { cursor });
+                result = ParseEvents(raw as List<Dictionary<string, string>>);
+                for (int i = 0; i < result.Count; i++) if (result[i].Sequence > cursor) cursor = result[i].Sequence;
             }
             catch { }
             return result;
@@ -125,6 +212,9 @@ namespace ErenshorDeepSims
                         PropertyInfo active = type.GetProperty("IsHuntCampActive", flags);
                         MethodInfo snapshot = type.GetMethod("GetCurrentSnapshot", flags, null, Type.EmptyTypes, null);
                         MethodInfo eventsAfter = type.GetMethod("GetEventsAfter", flags, null, new[] { typeof(long) }, null);
+                        MethodInfo relaxEventsAfter = type.GetMethod("GetRelaxEventsAfter", flags, null, new[] { typeof(long) }, null);
+                        MethodInfo livingEventsAfter = type.GetMethod("GetLivingEventsAfter", flags, null, new[] { typeof(long) }, null);
+                        MethodInfo socialContext = type.GetMethod("GetCurrentSocialContext", flags, null, Type.EmptyTypes, null);
                         if (active == null || active.PropertyType != typeof(bool) ||
                             snapshot == null || snapshot.ReturnType != typeof(Dictionary<string, string>) ||
                             eventsAfter == null || eventsAfter.ReturnType != typeof(List<Dictionary<string, string>>))
@@ -134,6 +224,14 @@ namespace ErenshorDeepSims
                         _isActiveProperty = active;
                         _snapshotMethod = snapshot;
                         _eventsMethod = eventsAfter;
+
+                        // Additive social/living surfaces are versioned independently from SchemaVersion.
+                        // Bind them only when the exact current v1 contract is proven. Future versions
+                        // therefore fail soft instead of being silently interpreted with stale semantics.
+                        bool socialV1 = ContractIsSupported(type, "SocialContractVersion", SupportedSocialContractVersion);
+                        _relaxEventsMethod = socialV1 && relaxEventsAfter != null && relaxEventsAfter.ReturnType == typeof(List<Dictionary<string, string>>) ? relaxEventsAfter : null;
+                        _livingEventsMethod = socialV1 && livingEventsAfter != null && livingEventsAfter.ReturnType == typeof(List<Dictionary<string, string>>) ? livingEventsAfter : null;
+                        _socialContextMethod = socialV1 && socialContext != null && socialContext.ReturnType == typeof(Dictionary<string, string>) ? socialContext : null;
                         break;
                     }
                 }
@@ -150,6 +248,17 @@ namespace ErenshorDeepSims
                 FieldInfo schema = type.GetField("SchemaVersion", BindingFlags.Public | BindingFlags.Static);
                 return schema != null && schema.FieldType == typeof(int) &&
                        (int)schema.GetValue(null) == SupportedSchemaVersion;
+            }
+            catch { return false; }
+        }
+
+        private static bool ContractIsSupported(Type type, string fieldName, int expected)
+        {
+            if (type == null || string.IsNullOrWhiteSpace(fieldName)) return false;
+            try
+            {
+                FieldInfo field = type.GetField(fieldName, BindingFlags.Public | BindingFlags.Static);
+                return field != null && field.FieldType == typeof(int) && (int)field.GetValue(null) == expected;
             }
             catch { return false; }
         }
@@ -235,12 +344,32 @@ namespace ErenshorDeepSims
                 long seq;
                 evt.Sequence = row.TryGetValue("sequence", out seqRaw) && long.TryParse(seqRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out seq) ? seq : 0L;
 
+                string eventId; evt.EventId = row.TryGetValue("eventId", out eventId) ? eventId : null;
+                string source; evt.Source = row.TryGetValue("source", out source) ? source : null;
+                string sessionId; evt.SessionId = row.TryGetValue("sessionId", out sessionId) ? sessionId : null;
+                string contractRaw; int contract;
+                if (row.TryGetValue("livingContractVersion", out contractRaw) &&
+                    int.TryParse(contractRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out contract))
+                    evt.ContractVersion = contract;
+                else if (row.TryGetValue("socialContractVersion", out contractRaw) &&
+                         int.TryParse(contractRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out contract))
+                    evt.ContractVersion = contract;
+                string mode; evt.Mode = row.TryGetValue("mode", out mode) ? mode : null;
                 string type;
                 evt.Type = row.TryGetValue("type", out type) ? type : null;
                 string zone;
                 evt.Zone = row.TryGetValue("zone", out zone) ? zone : null;
                 string detail;
                 evt.Detail = row.TryGetValue("detail", out detail) ? detail : null;
+                string partyNames; evt.PartyNames = row.TryGetValue("partyNames", out partyNames) ? partyNames : null;
+                string participant; evt.ParticipantName = row.TryGetValue("participantName", out participant) ? participant : null;
+                string counterpart; evt.Counterpart = row.TryGetValue("counterpart", out counterpart) ? counterpart : null;
+                string subject; evt.SubjectCategory = row.TryGetValue("subjectCategory", out subject) ? subject : null;
+                string subjectSource; evt.SubjectSource = row.TryGetValue("subjectSource", out subjectSource) ? subjectSource : null;
+                string presentation; evt.PresentationCategory = row.TryGetValue("presentationCategory", out presentation) ? presentation : null;
+                string meaningfulRaw; bool meaningful;
+                if (row.TryGetValue("meaningful", out meaningfulRaw) && bool.TryParse(meaningfulRaw, out meaningful))
+                { evt.MeaningfulKnown = true; evt.Meaningful = meaningful; }
 
                 if (!string.IsNullOrEmpty(evt.Type)) result.Add(evt);
             }

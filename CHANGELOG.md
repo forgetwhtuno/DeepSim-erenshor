@@ -1,3 +1,66 @@
+## 0.8.2 Beta — cognition observability / persistence forensics (unreleased)
+
+- Added privacy-safe live-cache, writer-clone, pre-serialization, exact JSON field-presence, and post-replacement disk-readback diagnostics for structured Sim memory collections. Serialization behavior is intentionally unchanged; this build localizes the existing loss rather than claiming a fix.
+- Extended the existing opt-in PromptCapture packets to context pulses, autonomous openers, session reflection, and social curation, including request lane/generation/source correlation and autonomous queued-versus-visible disposition.
+- Added content-free event/seed, Recent Life, reflection, curation, and pre-visibility cognition-advance counters plus deterministic non-mutation/capture-policy/visibility tests. Social cadence, prompts, seed ranking, reflection cadence, and curation policy are unchanged.
+
+## 0.8.2 Beta — Lively conversation tuning (unreleased)
+
+- Tuned only full-party (3–5 Sim) Lively `SocialDowntime`/`ExtendedDowntime`: the first context-pulse silence remains ordinary, the second applies strong safe-seed preference, and the third attempts a safe seed without guaranteeing a line. Normal, Quiet, one-Sim, combat, player-turn, and active-thread behavior remain outside this pressure.
+- Equalized the three fact-free free-social seed bases (question, hypothetical, impulse) and added a small full-party-Lively-only contextual-source tie-breaker. It favors already safe/relevant callback, identity, Recent Life, Campmaster, ambient, and free-social candidates over a close generic fallback; it never creates a candidate or bypasses source, scope, TTL, KnownBy, or grounding checks.
+- Replaced the umbrella `ordinary` runtime seed label with bounded precise source labels and a privacy-safe candidate-source count diagnostic. No seed text, prompts, memory contents, raw chat, or IDs are logged.
+- Added deterministic coverage for the revised silence contract, close contextual-vs-generic selection, all free-social shapes, and 30-minute Lively/Normal/one-Sim/combat production-path-like scheduler simulations.
+
+## 0.8.2 Beta — release hardening / identity regression recovery
+
+- Replaced blind 120-second-per-line social thread renewal with explicit recent-visible, pending-follow-up, and inference state. Autonomous threads close after 40 seconds of inactivity and have a non-renewable 60-second ceiling; terminal silence, rejection, stale work, no speaker, inference failure, topic change, and combat release immediately.
+- Added lightweight social-claim classification: clearly framed opinions, questions, hypotheticals, jokes, preferences, and casual uncertainty use an ephemeral permissive path, while ambiguous declarations and concrete history/state/news claims retain full provenance grounding and AI/engineering language remains rejected.
+- Added bounded Lively silence fatigue for 3–5 Sim downtime plus three fact-free social seed types and short-lived grounded Campmaster activity seeds. The fourth consecutive silence attempts a safe seed but never bypasses grounding, stale, or player-priority guards.
+- Repaired the Campmaster activity bridge fail-soft path: contradictory stale `ActiveGameplay` snapshots now produce bounded diagnostics and fall back to standalone downtime classification, while fresh pull/PvP/Duel/travel/readiness signals remain authoritative.
+- Made party join/leave events short-lived topic seeds instead of narration prompts, and added optional grounded Recent Life and HEARD Say/Shout candidates to the existing ambient selector without changing current-events cadence or the single-inference budget.
+- Base non-combat `ActiveGameplay` now uses the same context-assessment scheduler instead of a seed-only timer. A four/five-Sim Lively party is assessed every 45–90 seconds even without Campmaster downtime; Campmaster-proven downtime remains faster at 20–45 seconds.
+- Added character-scoped Recent Life catch-up for native Friends through Party Tools' optional historical v2 contract: seven-day/four-hour bounded windows, mundane identity-weighted MMO activity, participant-scoped overlap, seven-day retention, and no native progression writes.
+- Added 20–60 minute low-priority organic current-event opportunities during MMO social downtime. They reuse ExternalNews evidence/TTL, yield to direct/current threads, suppress ephemeral duplicates, share one evidence bundle through the thread, and never persist the headline as learned memory.
+- Added Campmaster-owned automatic Relax after 60 seconds of verified safe stationary party downtime, activity-aware 30–60 second full-party Lively context pulses, a bounded ephemeral visible-chat buffer, and expiring unanswered-turn context. Context pulses may choose silence and remain below direct player work on the existing single inference semaphore.
+- Corrected the effective-rate funnel so rolling visible-message and speaker cooldown capacity is charged only at the final display boundary; stale, malformed, ungrounded, or no-longer-addressable queued output no longer spends visible capacity.
+- Auto Relax is social context only. It exits on combat, travel, competitive activity, readiness/scene loss, or meaningful native pull activity and never starts Campmaster living activities. Campmaster-absent operation retains the prior fail-soft ordinary pacing.
+- Added query-relevance filtering and evidence admission for external current-events answers. A retrieved relevant headline now rejects contradictory "no news" wording, retries once, then falls back to a bounded headline-based line.
+- Lively now uses one party-level jittered cadence scaled by currently eligible Sims (1: 180–360s, 2: 120–240s, 3: 90–180s, 4–5: 60–150s). Ambient openers can form 1–3 turn tails with 8–30s read windows, player/stale/combat guards intact, and a bounded personality-plus-recency speaker influence.
+- Campmaster watch and disagreement facts can seed the existing verified-event conversation path without strengthening the supplied fact; optional structured subject/presentation fields remain additive and fail soft.
+- Reconciled plugin, assembly, build, documentation, HTTP user-agent, validator, and suite-manifest surfaces on the intended public `0.8.2` beta version.
+- Retained the existing beta identity contract: verified native Erenshor identity, one in-world Erenshor persona, one fictional MMO-player background, and bounded character-scoped memory. Named role profiles remain post-beta future work.
+- Repaired the retained-uGUI Sim selector template geometry so Unity's generated option items remain inside the popup viewport and the popup stays outside the editor's scrolling content.
+- Made the normal prompt-memory read establish and persist a fresh Sim's deterministic fictional MMO-player background; opening the editor is no longer required, authored values still win, Reset restores the same generated value, and Roleplay still excludes it.
+- Added a bounded direct-conversation ownership window around autonomous admission, while retaining generation-based stale completion rejection and allowing non-conflicting autonomous banter after the window.
+- Rejected unsupported quest/map/page directions at the grounding boundary unless verified or retrieved evidence supports the guidance.
+- Repaired the Identity Editor source validator to verify the current top-stretched retained-layout invariant rather than an obsolete helper-call spelling.
+- Kept exact local prompt capture developer-only and off by default; public packages exclude live configs, captures, diagnostics, memory, exports, logs, local paths, and runtime/game libraries.
+- Release remains gated on exact-candidate deterministic/native validation, hash-matched installation, clean-start live identity checks, character isolation, pending-request hot-unload stress, standalone operation, and full-suite compatibility.
+
+## 0.8.1 development — Live social quality / simulated-player identity / event awareness
+
+- Practice Duel v4 semantic events now retain RequestId/DuelId correlation, factual winner/yield results, explicit participant knowledge plus positively proven loaded same-scene Deep Sim witnesses, one character-scoped Living Social episode, and bounded `/dssocial recent` diagnostics.
+- Campmaster social/living v1 facts now flow into Living Social with session/zone safety, durable factual watch/disagreement memory candidates, and no inferred attacker/outcome.
+- MMO perspective now has a third identity layer: a persistent fictional simulated-player background. Authored overrides win over stable generated defaults; Roleplay perspective does not expose this layer.
+- Identity & Memory retained-uGUI layout now uses resolution-independent anchors, a scrollable form, direct label/editor grouping, and Generated/Authored/Unknown source indicators.
+- Repeated same-speaker chat evidence is canonicalized for prompts/memory while retaining recurrence counts.
+- Curation/reflection inference now uses the shared inference gate and yields before starting when player work is pending; low-value autonomous lines do not spend an extra semantic grounding retry. `/dsperf` exposes player queue wait, grounding/retry, dedupe, and social-event counters.
+- Added deterministic live-social quality coverage and source/current-contract verification.
+
+## 0.8.0 development — Roleplay grounding / seed quality + Living Social Simulation
+
+- Reconciled the Roleplay/seed-quality repair with the Living Social Simulation layer: verified social episodes, participant/KnownBy separation, causal transient affect, bounded pairwise relationships, authored wants/cares, response pivots, social curation, and inside-joke memory metadata now coexist with the stricter Roleplay/meta and social-authority guards.
+- Added exact Practice Duel v4 correlation through an optional reflection-only `PracticeDuelEvents.SemanticEvent` adapter. The legacy Duel bridge still owns visible reactions, while Living Social receives DuelId/participant A/B without a hard dependency or participant-name guessing.
+- Preserved PvP/Nemesis MatchId correlation so the Living Social episode can merge rivalry metadata while the legacy/session event stream emits only one correlated terminal event.
+- Campmaster remains the factual camp authority through its additive social-context/event surface; Deep Sims owns only interpretation, memory, affect, and expression.
+- This is a reconciliation candidate: compile, deterministic Windows tests, build/install, and live social QA are still required on the authoritative local workspace.
+
+- Removed conflicting/meta Roleplay identity framing that could be echoed by the local 4B model, including the exact `this Erenshor character` live failure; strengthened the central Roleplay output guard and routed its rejections through the existing single semantic retry/fallback path.
+- Added self-identity routing/fallback behavior that prioritizes authored Erenshor persona and verified live identity while keeping the modern personal-background layer out of Roleplay and refusing to invent unknown origins.
+- Added self-guild membership verification and bounded social-authority checks for guild recruitment/invites/promotions/kicks plus item/skill granting promises. Guild membership alone never establishes authority.
+- Added relevance-gated authored identity and KnownBy-scoped pinned/shared/learned memory as ambient seed sources, with fatigue preserved and recent verified Duel/PvP/Nemesis events weighted as high-value factual episodes.
+- Added defensive cross-source PvP/Nemesis terminal correlation, privacy-safe seed-source diagnostics, and deterministic regression coverage for meta leakage, authority claims, identity mode separation, pinned/shared memory scope/relevance/fatigue, competitive-event prioritization/correlation, and diagnostic privacy.
+
 ## 0.7.6 development — Sim-to-Sim responsiveness
 
 - Added `SimResponseDecision`, the Sim-to-Sim counterpart of `ShouldReplyDeterministic`: every party line that becomes visible is now re-evaluated to decide whether another present Sim should answer it. Unlike the player-line gate it returns a graded urge rather than a boolean - a named address or a question is `Strong`, an opinion / disagreement / anomaly reaction is `Normal`, an ordinary substantive statement is `Weak`, and tactical spam, slash commands, trivial acknowledgements and short filler are `None`. It is pure, IO-free, and takes the speaker and the live party roster as parameters; no Sim or player identity is hardcoded.
@@ -87,7 +150,16 @@
 - Extended deterministic social-policy tests. Full game-linked compilation still requires the local Erenshor/BepInEx assemblies.
 # Changelog
 
-## Unreleased
+## 0.7.6 development — default identity / identity & memory editor
+
+- Added the retained uGUI Deep Sims Identity & Memory Editor, reachable from the existing Deep Sims panel with no new global hotkey. It exposes verified current context and deterministic defaults separately from four authored override fields, plus distinct pinned/authored, shared-history, and learned-memory sections. Learned memory may be forgotten or copied into authored pinned memory but cannot be edited in place and mislabeled as learned.
+- Added conservative deterministic default identity scaffolding for the current Arcanist, Druid, Paladin, Reaver, Stormcaller, and Windblade classes, with stable bounded personality variation and level-sensitive confidence tone. Defaults explicitly avoid specific family/origin/training/religion/order/accomplishment/history claims and are regenerated rather than written to native saves.
+- Added verified current-character Friend-state context using the current native `SimPlayerTracking.FriendedBy == CurrentCharacterSlot.index` predicate while preserving an explicit unknown state. Friend defaults permit ordinary friendliness only; they do not invent closeness or shared history.
+- Preserved identity authority layering in prompts: live native facts > authored canon > verified learned history > default template > soft persona/heard dialogue. Relevant authored/default background is admitted only when the current turn actually asks for it.
+- Added authored-memory edit/remove, learned-memory Forget / Copy-to-Pinned, selected-participant KnownBy shared history, and identity-only reset operations that do not erase memory layers.
+- Added explicit local versioned JSON export/import for the four authored biography fields only. Raw conversations, prompt captures, learned memory, shared KnownBy records, diagnostics, and machine paths are excluded.
+- Replaced the legacy first-seen sidecar phrase `First adventured with the player...` with the factual `First observed by Deep Sims...`, preventing first access from fabricating a shared outing.
+- Expanded deterministic/source/assembly regression coverage for current classes, stable defaults, overrides/resets, memory separation, KnownBy, Friend defaults, prompt relevance/priority, cross-character isolation, retained uGUI, malformed imports, and current native Friend/class surface evidence.
 
 - Added the optional fact-only `PvpEventBridge` consumed by the standalone Erenshor PvP mod. Sanitized challenge, acceptance, refusal, cancellation, victory, defeat, and retreat facts enter the existing verified event conversation pipeline; no gameplay decisions flow back to PvP. The bridge remains absent-safe and duplicate-suppressed.
 
@@ -173,7 +245,7 @@
 - Added `GroundingGuard.NoteStaleDiscard`-adjacent debug diagnostics for the external-news answer path (`news lookup generation=... query=... results=...`, `news answer generation attempt=N ... grounding=accept|reject reason=...`, `news answer scheduled generation=...`, and stale discards tagged `news answer discarded stage=... reason=stale generation=... current=...`), gated behind the existing BepInEx debug log level. The existing party-message generation-recheck pattern (before-lookup / before-inference / after-inference / before-display) already covered the news-lookup path end-to-end; it is now unchanged but more diagnosable.
 - Added 12 new deterministic tests (`QualityReliabilityDeterministicTests.TestNewsProvenanceAndOpinionGuards`) covering: a supported real-world statement despite absent Erenshor game facts, cross-headline relationship rejection, a safe side-by-side headline mention, unsupported "again" in a news answer, the news-specific correction prompt, external news never becoming verified game memory, general-opinion vs concrete-action-fact assertions, hypothetical intent, "again" shared-history rejection, and generation-based stale discard vs a grounding-reject reason.
 
-## 0.7.0 â€” Relationships & Event Conversations (Development)
+## 0.7.0 — Relationships & Event Conversations (Development)
 
 - Added bounded, persisted Familiarity, Rapport, and Rivalry tone dimensions for Sim-to-player and Sim-to-Sim relationships.
 - Familiarity now derives from completed outings, actual grouped time, and repeated exchanges; group joins and quick reconnects no longer increase it directly.
@@ -196,7 +268,7 @@
 - Idle chatter can occasionally reuse a safe, personalized line from the selected Sim's native dialogue pool without an Ollama request.
 - Adding Sims to an active party now extends the existing outing; departures still finalize/start an outing so familiarity counts are not inflated by invites.
 
-## 0.6.2 â€” Native Chat Styling
+## 0.6.2 — Native Chat Styling
 
 - Learns Erenshor's actual vanilla Sim group-chat color from live `UpdateSocialLog.LogAdd(text, color)` calls.
 - Deep Sim `tells the group` lines now reuse that native color instead of a hard-coded light-blue tint.
@@ -205,7 +277,7 @@
 - Keeps text/emoji/rich-text sanitization; no generated `<color=...>` markup is inserted.
 - Falls back to the known-safe `lightblue` color until a native style has been observed in the current run.
 
-## 0.6.1 â€” Performance Diagnostics + Inference Modes
+## 0.6.1 — Performance Diagnostics + Inference Modes
 
 - Added detailed Ollama timing breakdown from API response statistics: total, model load, prompt evaluation, token evaluation, token counts, and retry count.
 - Added frame-hitch tracking and correlation with active/recent AI requests.
@@ -217,7 +289,7 @@
 - Added a temporal-history grounding guard for unsupported phrases such as `again`, `last time`, or `remember when` when no matching verified memory exists.
 - Retains 0.6.0 encounter separation, session export, and Sim-to-Sim social-history foundation.
 
-## 0.6.0 â€” Social History Foundation
+## 0.6.0 — Social History Foundation
 
 - Began the 0.6 Social History phase.
 - Fixed `last fight` / `previous fight` routing so it uses only a completed encounter.

@@ -20,6 +20,17 @@ namespace ErenshorDeepSims
             return workGeneration != currentGeneration;
         }
 
+        // A completed direct reply does not instantly release the party floor to unrelated ambient
+        // inference. Keep a short, bounded quiet window so a player's next direct line owns the
+        // exchange; autonomous speech remains eligible again once that window expires.
+        internal static bool DirectConversationOwnsTurn(long lastDirectPlayerUtcTicks, long nowUtcTicks,
+            double quietSeconds)
+        {
+            if (lastDirectPlayerUtcTicks <= 0 || nowUtcTicks < lastDirectPlayerUtcTicks) return false;
+            long quietTicks = (long)(Math.Max(0.0, quietSeconds) * TimeSpan.TicksPerSecond);
+            return nowUtcTicks - lastDirectPlayerUtcTicks < quietTicks;
+        }
+
         // Lines that are tactical commands, spam, or bookkeeping rather than actual banter. These must
         // never anchor topic detection or count toward the recent conversational window.
         internal static bool IsNoiseLine(string text)

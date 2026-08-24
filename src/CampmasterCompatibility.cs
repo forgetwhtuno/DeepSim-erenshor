@@ -16,12 +16,14 @@ namespace ErenshorDeepSims
         private DateTime _nextResolveUtc = DateTime.MinValue;
         private bool _healthy;
         private bool _warned;
+        private bool _socialWarned;
         private Type _apiType;
         private PropertyInfo _activeProperty;
         private PropertyInfo _relaxActiveProperty;
         private PropertyInfo _latestSequenceProperty;
         private FieldInfo _schemaVersionField;
         private MethodInfo _eventsAfterMethod;
+        private MethodInfo _socialContextMethod;
         private long _lastSequence;
         private DateTime _nextPollUtc = DateTime.MinValue;
 
@@ -37,6 +39,11 @@ namespace ErenshorDeepSims
                 EnsureResolved();
                 return _healthy;
             }
+        }
+
+        internal bool SocialContextAvailable
+        {
+            get { EnsureResolved(); return _healthy && _socialContextMethod != null; }
         }
 
         internal bool IsHuntCampActive
@@ -59,6 +66,30 @@ namespace ErenshorDeepSims
                 try { return (bool)_relaxActiveProperty.GetValue(null, null); }
                 catch (Exception ex) { MarkUnhealthy("Campmaster Relax-state read failed", ex); return false; }
             }
+        }
+
+        internal CampmasterSocialContext ReadSocialContext()
+        {
+            EnsureResolved();
+            if (!_healthy || _socialContextMethod == null) return null;
+            try
+            {
+                IDictionary row = _socialContextMethod.Invoke(null, null) as IDictionary;
+                if (row == null) return null;
+                CampmasterSocialContext value = new CampmasterSocialContext();
+                value.ActivityState = Read(row, "activityState");
+                value.ActivityReason = Read(row, "activityReason");
+                value.Zone = Read(row, "zone");
+                value.Mode = Read(row, "mode");
+                value.Recognition = Read(row, "recognition");
+                value.GameplayReady = ReadBool(row, "gameplayReady");
+                value.AutoRelaxActive = ReadBool(row, "autoRelaxActive") == true;
+                value.SecondsStationary = ReadDouble(row, "secondsStationary");
+                value.SecondsOutOfCombat = ReadDouble(row, "secondsOutOfCombat");
+                value.SecondsSinceMeaningfulGameplay = ReadDouble(row, "secondsSinceMeaningfulGameplay");
+                return value;
+            }
+            catch (Exception ex) { MarkUnhealthy("Campmaster social-context read failed", ex); return null; }
         }
 
         internal List<CampmasterSemanticEvent> Poll(DateTime now)
@@ -133,6 +164,7 @@ namespace ErenshorDeepSims
                 _latestSequenceProperty = _apiType.GetProperty("LatestEventSequence", flags);
                 _schemaVersionField = _apiType.GetField("SchemaVersion", flags);
                 _eventsAfterMethod = _apiType.GetMethod("GetEventsAfter", flags, null, new Type[] { typeof(long) }, null);
+                _socialContextMethod = _apiType.GetMethod("GetCurrentSocialContext", flags, null, Type.EmptyTypes, null);
 
                 int schema = 0;
                 if (_schemaVersionField != null)
@@ -149,6 +181,11 @@ namespace ErenshorDeepSims
                 }
 
                 _healthy = true;
+                if (_socialContextMethod == null && !_socialWarned)
+                {
+                    _socialWarned = true;
+                    if (_log != null) _log.LogWarning("Campmaster social-context API is unavailable; Deep Sims standalone downtime detection remains enabled.");
+                }
                 // Never replay retained Campmaster history on bind. Current active state is queried
                 // separately, and only events emitted after this boundary are consumed.
                 _lastSequence = ReadLatestSequence();
@@ -203,13 +240,26 @@ namespace ErenshorDeepSims
             return string.Empty;
         }
 
+        private static bool? ReadBool(IDictionary row, string key)
+        {
+            bool parsed;
+            return bool.TryParse(Read(row, key), out parsed) ? (bool?)parsed : null;
+        }
+
+        private static double ReadDouble(IDictionary row, string key)
+        {
+            double parsed;
+            return double.TryParse(Read(row, key), System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out parsed) ? Math.Max(0.0, parsed) : 0.0;
+        }
+
         private void MarkUnhealthy(string prefix, Exception ex)
         {
             _healthy = false;
             _resolved = false;
             _apiType = null;
             _nextResolveUtc = DateTime.UtcNow.AddSeconds(5.0);
-            string detail = ex == null ? string.Empty : ": " + ex.GetBaseException().Message;
+            string detail = ex == null ? string.Empty : ": " + DiagnosticPrivacy.ExceptionType(ex);
             WarnOnce(prefix + detail + ". Legacy Deep Sims camp behavior remains enabled.");
         }
 
@@ -229,5 +279,19 @@ namespace ErenshorDeepSims
         internal string SessionId;
         internal string Zone;
         internal string Detail;
+    }
+
+    internal sealed class CampmasterSocialContext
+    {
+        internal string ActivityState;
+        internal string ActivityReason;
+        internal string Zone;
+        internal string Mode;
+        internal string Recognition;
+        internal bool? GameplayReady;
+        internal bool AutoRelaxActive;
+        internal double SecondsStationary;
+        internal double SecondsOutOfCombat;
+        internal double SecondsSinceMeaningfulGameplay;
     }
 }

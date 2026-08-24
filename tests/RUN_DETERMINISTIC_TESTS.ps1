@@ -25,12 +25,33 @@ $sourceFiles = @(
     (Join-Path $repoRoot "src\DeepSimsLog.cs"),
     (Join-Path $repoRoot "src\DiagnosticPrivacy.cs"),
     (Join-Path $repoRoot "src\DiagnosticPrivacyTests.cs"),
+    (Join-Path $repoRoot "src\DialogueControl.cs"),
+    (Join-Path $repoRoot "src\CognitionObservability.cs"),
+    (Join-Path $repoRoot "src\CognitionObservabilityDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\SimMemoryPersistence.cs"),
+    (Join-Path $repoRoot "src\SimMemoryPersistenceDeterministicTests.cs"),
     (Join-Path $repoRoot "src\CharacterScopeKey.cs"),
     (Join-Path $repoRoot "src\CharacterScopeWriteGuard.cs"),
     (Join-Path $repoRoot "src\CharacterScopeDeterministicTests.cs"),
     (Join-Path $repoRoot "src\DeepSimsControlPolicy.cs"),
     (Join-Path $repoRoot "src\DeepSimsControlPolicyTests.cs"),
     (Join-Path $repoRoot "src\Models.cs"),
+    (Join-Path $repoRoot "src\SimulatedPlayerIdentity.cs"),
+    (Join-Path $repoRoot "src\ConversationEvidenceDedupe.cs"),
+    (Join-Path $repoRoot "src\InferencePriorityPolicy.cs"),
+    (Join-Path $repoRoot "src\LiveSocialQualityPolicy.cs"),
+    (Join-Path $repoRoot "src\CampmasterBridge.cs"),
+    (Join-Path $repoRoot "src\LiveSocialQualityDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\LivingSocialSimulation.cs"),
+    (Join-Path $repoRoot "src\RecentLife.cs"),
+    (Join-Path $repoRoot "src\OrganicCurrentEvents.cs"),
+    (Join-Path $repoRoot "src\RecentLifeCurrentEventsDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\IdentityDefaults.cs"),
+    (Join-Path $repoRoot "src\IdentityContext.cs"),
+    (Join-Path $repoRoot "src\IdentityContextDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\IdentityEditorModel.cs"),
+    (Join-Path $repoRoot "src\IdentityProfileTransfer.cs"),
+    (Join-Path $repoRoot "src\DeepSimsPaths.cs"),
     (Join-Path $repoRoot "src\LivePartyFacts.cs"),
     (Join-Path $repoRoot "src\PartyStanceGuard.cs"),
     (Join-Path $repoRoot "src\PartyGroundingRequestContext.cs"),
@@ -38,6 +59,10 @@ $sourceFiles = @(
     (Join-Path $repoRoot "src\LivePartyGroundingTests.cs"),
     (Join-Path $repoRoot "src\RelationshipModel.cs"),
     (Join-Path $repoRoot "src\SocialFoundation.cs"),
+    (Join-Path $repoRoot "src\SocialSituation.cs"),
+    (Join-Path $repoRoot "src\AutonomousSocialScheduler.cs"),
+    (Join-Path $repoRoot "src\SocialSituationDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\AutonomousSocialSchedulerDeterministicTests.cs"),
     (Join-Path $repoRoot "src\GroupMessageQueue.cs"),
     (Join-Path $repoRoot "src\ConversationHistory.cs"),
     (Join-Path $repoRoot "src\SocialSession.cs"),
@@ -50,6 +75,8 @@ $sourceFiles = @(
     (Join-Path $repoRoot "src\GroundingGuard.cs"),
     (Join-Path $repoRoot "src\RoleplayPerspective.cs"),
     (Join-Path $repoRoot "src\RoleplayDeterministicTests.cs"),
+    (Join-Path $repoRoot "src\NemesisRoleContext.cs"),
+    (Join-Path $repoRoot "src\NemesisRoleContextDeterministicTests.cs"),
     (Join-Path $repoRoot "src\PromptBuilder.cs"),
     (Join-Path $repoRoot "src\ExternalNewsClient.cs"),
     (Join-Path $repoRoot "src\NetworkTimeoutHelper.cs"),
@@ -58,6 +85,7 @@ $sourceFiles = @(
     (Join-Path $repoRoot "src\WikiClient.cs"),
     (Join-Path $repoRoot "src\ConversationSeeds.cs"),
     (Join-Path $repoRoot "src\ConversationSeedTests.cs"),
+    (Join-Path $repoRoot "src\ConversationSeedRuntimeDeterministicTests.cs"),
     (Join-Path $repoRoot "src\DeterministicRegressionTests.cs"),
     (Join-Path $repoRoot "src\QualityReliabilityDeterministicTests.cs"),
     (Join-Path $repoRoot "src\ConversationTurnGuard.cs"),
@@ -129,6 +157,53 @@ else {
 $pluginSource = Get-Content (Join-Path $repoRoot "src\DeepSimsPlugin.cs") -Raw
 $ollamaClientSource = Get-Content (Join-Path $repoRoot "src\OllamaClient.cs") -Raw
 $modelResolutionSource = Get-Content (Join-Path $repoRoot "src\DeepSimsModelResolution.cs") -Raw
+$recentLifeSource = Get-Content (Join-Path $repoRoot "src\RecentLife.cs") -Raw
+$currentEventsSource = Get-Content (Join-Path $repoRoot "src\OrganicCurrentEvents.cs") -Raw
+$memoryStoreSource = Get-Content (Join-Path $repoRoot "src\MemoryStore.cs") -Raw
+
+# Native semantic-chat contract. Social party/tell output must use the verified typed
+# ChatLogLine path; ordinary WriteChat remains the SystemMessages writer for status, errors,
+# diagnostics, and command feedback. These structural checks intentionally avoid constructing
+# the Unity-bound plugin in the standalone harness.
+foreach ($token in @('WriteSemanticChat(text, ChatLogLine.LogType.Party, NativePartyColor)', 'WriteSemanticChat(text, ChatLogLine.LogType.Whisper, NativeWhisperColor)', 'new ChatLogLine(text, type, nativeColor)')) {
+    if ($pluginSource -notmatch [regex]::Escape($token)) { throw "Native chat semantic guard failed: missing $token" }
+}
+foreach ($forbidden in @('NoteSocialLogStyle', '_nativeSimGroupColor', '_nativePlayerGroupColor', '_nativeIncomingWhisperColor', '_nativeOutgoingWhisperColor', 'GetNativeSimGroupColor', 'GetNativePlayerGroupColor')) {
+    if ($pluginSource -match [regex]::Escape($forbidden)) { throw "Native chat semantic guard failed: obsolete text/color cache remains: $forbidden" }
+}
+if ($pluginSource -notmatch 'WritePartyChat\("You tell your group: " \+ partyMessage\)') {
+    throw "Native chat semantic guard failed: intercepted social /p is not emitted as typed Party output."
+}
+if (([regex]::Matches($pluginSource, 'WritePartyChat\("You tell your group: " \+ partyMessage\)')).Count -ne 1) {
+    throw "Native chat semantic guard failed: player social /p must have exactly one visible Party write."
+}
+if ($pluginSource -notmatch 'WritePartyChat\(line\.Speaker \+ " tells the group: " \+ shown\)') {
+    throw "Native chat semantic guard failed: final Sim group output is not typed Party output."
+}
+foreach ($token in @('WriteWhisperChat("You tell " + forced.Name + ": " + message)', 'WriteWhisperChat("You tell " + sim.Name + ": " + message)', 'WriteWhisperChat(fresh.Name + " tells you: " + shown)')) {
+    if ($pluginSource -notmatch [regex]::Escape($token)) { throw "Native chat semantic guard failed: missing typed whisper writer: $token" }
+}
+if ($pluginSource -notmatch 'internal\s+static\s+void\s+WriteChat\(string text, string color\)[\s\S]*?UpdateSocialLog\.LogAdd\(text, color\)') {
+    throw "Native chat semantic guard failed: generic WriteChat must remain the system/status compatibility writer."
+}
+Write-Host "PASS: Deep Sims Party/Whisper output uses typed native channels; system output remains generic" -ForegroundColor Green
+foreach ($token in @('MaxLookbackDays = 7','MaxRecordsTotal = 24','MaxRecordsPerSim = 3','simulated_recent_life','DeepSimsRecentLife','GetBaseAvailabilitySnapshotAtUtc')) {
+    if ($recentLifeSource -notmatch [regex]::Escape($token)) { throw "Recent Life source guard failed: missing $token" }
+}
+if ($recentLifeSource -match 'using\s+ErenshorPartyTools' -or $recentLifeSource -match 'DeterministicSalt') {
+    throw "Recent Life optional-integration guard failed: Party Tools implementation was duplicated or compile-linked."
+}
+$simulatedStore = [regex]::Match($memoryStoreSource, 'StoreSimulatedRecentLifeMemory[\s\S]*?\n        \}')
+if (-not $simulatedStore.Success -or $simulatedStore.Value -match 'UpdateSnapshotUnsafe\s*\(|GetOrCreateUnsafe\s*\(') {
+    throw "Recent Life observation guard failed: simulated history may write native-observation state."
+}
+foreach ($token in @('MinCooldownMinutes = 20','MaxCooldownMinutes = 60','TrySanitizeProposedQuery','TopicHash')) {
+    if ($currentEventsSource -notmatch [regex]::Escape($token)) { throw "Organic Current Events source guard failed: missing $token" }
+}
+foreach ($token in @('autonomousExternalFacts','ExternalNewsEvidenceFallback','organic_current_event','RecordEphemeralCurrentEventDialogue')) {
+    if ($pluginSource -notmatch [regex]::Escape($token)) { throw "Organic Current Events pipeline guard failed: missing $token" }
+}
+Write-Host "PASS: Recent Life persistence/optional-bridge and Organic Current Events evidence guards" -ForegroundColor Green
 
 # Exactly two call sites request an Ollama chat completion; both must exist.
 $chatAsyncCallSites = [regex]::Matches($pluginSource, '_ollama\.ChatAsync\(')
@@ -249,7 +324,7 @@ $outputDir = Join-Path $env:TEMP ("DeepSimsRegression-" + [Guid]::NewGuid().ToSt
 New-Item -ItemType Directory -Path $outputDir | Out-Null
 try {
     $output = Join-Path $outputDir "DeepSimsRegressionTests.exe"
-    $arguments = @("/nologo", "/target:exe", "/optimize+", ('/out:"{0}"' -f $output), ('/reference:"{0}"' -f $webExtensions)) + $sourceFiles
+    $arguments = @("/nologo", "/target:exe", "/optimize+", ('/out:{0}' -f $output), ('/reference:{0}' -f $webExtensions)) + $sourceFiles
     & $csc $arguments
     if ($LASTEXITCODE -ne 0) { throw "Regression test compilation failed." }
     & $output

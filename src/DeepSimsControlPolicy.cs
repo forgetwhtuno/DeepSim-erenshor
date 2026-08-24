@@ -117,7 +117,7 @@ namespace ErenshorDeepSims
         internal static string ActivityOrDefault(string value)
         {
             string normalized;
-            return TryNormalizeActivity(value, out normalized) ? normalized : "Adaptive";
+            return TryNormalizeActivity(value, out normalized) ? normalized : "Lively";
         }
 
         internal static string PerspectiveOrDefault(string value)

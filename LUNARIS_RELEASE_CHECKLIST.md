@@ -1,4 +1,4 @@
-# Deep Sims Native Lunaris Release Checklist
+# Deep Sims 0.8.2 Beta Release Checklist
 
 Do not mark the migration release-ready until every applicable item below has been observed on the current Erenshor + Lunaris build.
 
@@ -6,6 +6,7 @@ Do not mark the migration release-ready until every applicable item below has be
 
 - [ ] `BUILD_AND_INSTALL.ps1` compiles against the current installed `Assembly-CSharp.dll` and Unity assemblies.
 - [ ] Build uses the intended local `Lunaris.dll` and prints its hash/version.
+- [ ] Build records SHA-256 for every compile reference and the final candidate DLL.
 - [ ] No `BepInEx.dll` compile reference is required.
 - [ ] Only `ErenshorDeepSims.dll` is installed to `<Erenshor>/plugins`.
 - [ ] Lunaris/0Harmony/other runtime libraries are not bundled into the plugin output.
@@ -21,10 +22,12 @@ Do not mark the migration release-ready until every applicable item below has be
 - [ ] ConfigVersion/internal migration state is not presented as a normal player setting.
 - [ ] Changing a normal config option in the Lunaris UI is reflected by Deep Sims without restart where expected.
 - [ ] Restarting the game preserves changed Lunaris settings.
+- [ ] Clean release smoke does not print `Deep Sims local prompt capture is ENABLED`.
+- [ ] Public package contains no `.lpcfg`, memory, export, diagnostic, capture, or log files.
 
 ## C. Persistence
 
-- [ ] New memory lives under `<Erenshor>/plugins/config/DeepSims/Memory`.
+- [ ] New memory lives under `<Erenshor>/plugins/config/DeepSims/Memory/Characters/<character-key>`.
 - [ ] New memory survives game restart.
 - [ ] With an empty new memory directory and legacy direct-install memory present, the conservative legacy memory copy works.
 - [ ] Legacy files are not deleted.

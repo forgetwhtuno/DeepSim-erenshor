@@ -67,7 +67,8 @@ namespace ErenshorDeepSims
     internal sealed class EventConversationDirector
     {
         private const int MaxRecentDecisions = 16;
-        private const double CandidateLifetimeSeconds = 20.0;
+        private const double CandidateLifetimeSeconds = 120.0;
+        internal const double PartyMembershipLifetimeSeconds = 30.0;
         private const double DuplicateWindowSeconds = 300.0;
 
         private readonly DeepSimsPlugin _plugin;
@@ -76,6 +77,7 @@ namespace ErenshorDeepSims
             new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
         private readonly List<EventConversationDecision> _recent = new List<EventConversationDecision>();
         private SocialEventCandidate _pending;
+        private bool _pendingProbabilityAccepted;
 
         internal EventConversationDirector(DeepSimsPlugin plugin) { _plugin = plugin; }
 
@@ -112,6 +114,7 @@ namespace ErenshorDeepSims
             if (_pending == null)
             {
                 _pending = candidate;
+                _pendingProbabilityAccepted = false;
                 return;
             }
 
@@ -124,6 +127,7 @@ namespace ErenshorDeepSims
             {
                 Record(_pending, false, "lost to higher-priority event", string.Empty, now, false);
                 _pending = candidate;
+                _pendingProbabilityAccepted = false;
             }
             else
             {
@@ -188,12 +192,14 @@ namespace ErenshorDeepSims
             chance *= 0.70 + ((candidate.Importance / 100.0) * 0.30);
             if (_plugin != null) chance *= _plugin.GetSocialOpportunityMultiplier();
             chance = Math.Max(0.0, Math.Min(1.0, chance));
-            if (_random.NextDouble() > chance)
+            if (!_pendingProbabilityAccepted && _random.NextDouble() > chance)
             {
                 _pending = null;
+                _pendingProbabilityAccepted = false;
                 Record(candidate, false, "probability gate", string.Empty, now, false);
                 return;
             }
+            _pendingProbabilityAccepted = true;
 
             SocialEventCandidate ready = new SocialEventCandidate(candidate.Type, candidate.ObservedUtc,
                 candidate.InvolvedNames, available, candidate.VerifiedEntities, candidate.Trust,
@@ -204,7 +210,10 @@ namespace ErenshorDeepSims
             if (_plugin != null && !_plugin.TryAdmitAutonomousOpportunity(candidate.Type, priority,
                 Fingerprint(candidate), inOrRecentCombat, out reason))
             {
-                _pending = null;
+                // A significant verified event supplies a bounded social-energy window. Temporary
+                // player/combat/global ownership keeps the same candidate alive; it does not create
+                // another scheduler, reroll its facts, or force a line.
+                if (!ShouldRetryAfterTemporaryBlock(reason)) { _pending = null; _pendingProbabilityAccepted = false; }
                 Record(candidate, false, reason, string.Empty, now, false);
                 return;
             }
@@ -212,6 +221,7 @@ namespace ErenshorDeepSims
             string speaker = string.Empty;
             bool queued = _plugin != null && _plugin.QueueVerifiedEventConversation(ready, out speaker);
             _pending = null;
+            _pendingProbabilityAccepted = false;
             if (!queued)
             {
                 Record(candidate, false, "accepted but expression router produced no safe line",
@@ -243,7 +253,7 @@ namespace ErenshorDeepSims
                 reason = "below importance floor";
                 return false;
             }
-            if ((now - candidate.ObservedUtc).TotalSeconds > CandidateLifetimeSeconds)
+            if (!IsCandidateFresh(candidate, now))
             {
                 reason = "expired";
                 return false;
@@ -324,6 +334,9 @@ namespace ErenshorDeepSims
                 (!ShouldPromoteCompletedEncounter(new EncounterSnapshot()) ? "PASS" : "FAIL"));
             result.Add("recorded kill makes encounter socially eligible: " +
                 (ShouldPromoteCompletedEncounter(new EncounterSnapshot { TotalKills = 1 }) ? "PASS" : "FAIL"));
+            result.Add("event social-energy window is bounded to 120 seconds: " +
+                (IsCandidateFresh(new DateTime(2026, 1, 1, 0, 1, 59), new DateTime(2026, 1, 1)) &&
+                 !IsCandidateFresh(new DateTime(2026, 1, 1, 0, 2, 1), new DateTime(2026, 1, 1)) ? "PASS" : "FAIL"));
 
             List<string> social = SocialTemplates.RunSelfTests();
             for (int i = 0; i < social.Count; i++) result.Add(social[i]);
@@ -340,6 +353,35 @@ namespace ErenshorDeepSims
         {
             return last != DateTime.MinValue &&
                 (now - last).TotalSeconds < Math.Max(0.0, seconds);
+        }
+
+        internal static bool IsCandidateFresh(DateTime now, DateTime observedUtc)
+        {
+            return (now - observedUtc).TotalSeconds <= CandidateLifetimeSeconds;
+        }
+
+        internal static bool IsCandidateFresh(SocialEventCandidate candidate, DateTime now)
+        {
+            if (candidate == null) return false;
+            double lifetime = IsPartyMembershipEvent(candidate.Type)
+                ? PartyMembershipLifetimeSeconds : CandidateLifetimeSeconds;
+            return (now - candidate.ObservedUtc).TotalSeconds <= lifetime;
+        }
+
+        internal static bool IsPartyMembershipEvent(string type)
+        {
+            return string.Equals(type, "party_join", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(type, "party_leave", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool ShouldRetryAfterTemporaryBlock(string reason)
+        {
+            if (string.IsNullOrWhiteSpace(reason)) return false;
+            return reason.IndexOf("combat", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("player recently spoke", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("global cooldown", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("current conversation thread", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                reason.IndexOf("social moment", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         internal static int ClampEventThreadLines(int requested)
@@ -375,7 +417,7 @@ namespace ErenshorDeepSims
             for (int i = 0; i < remove.Count; i++) _fingerprints.Remove(remove[i]);
         }
 
-        private static string Fingerprint(SocialEventCandidate candidate)
+        internal static string Fingerprint(SocialEventCandidate candidate)
         {
             return (candidate.Type + "|" + candidate.CooldownCategory + "|" +
                 candidate.VerifiedContext).Trim().ToLowerInvariant();

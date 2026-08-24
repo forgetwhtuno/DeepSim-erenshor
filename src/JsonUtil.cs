@@ -12,12 +12,13 @@ namespace ErenshorDeepSims
             return JsonUtility.FromJson<T>(text);
         }
 
-        internal static void WriteFile<T>(string path, T value)
+        internal static JsonWriteObservation WriteFile<T>(string path, T value)
         {
             string parent = Path.GetDirectoryName(path);
             if (!string.IsNullOrEmpty(parent)) Directory.CreateDirectory(parent);
             string text = JsonUtility.ToJson(value, true);
             File.WriteAllText(path, text, new UTF8Encoding(false));
+            return new JsonWriteObservation { Fields = JsonFieldPresenceObservation.Inspect(text) };
         }
 
         internal static T Clone<T>(T value)

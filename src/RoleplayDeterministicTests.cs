@@ -76,16 +76,41 @@ namespace ErenshorDeepSims
             Add(r, "RP prompt does not say typing while playing", lower.IndexOf("typing while playing", StringComparison.Ordinal) < 0);
             Add(r, "RP prompt does not permit MMO slang", lower.IndexOf("mmo slang", StringComparison.Ordinal) < 0);
 
-            Add(r, "RP prompt forbids treating world as a game", lower.IndexOf("not a game", StringComparison.Ordinal) >= 0);
+            Add(r, "RP prompt keeps perspective entirely in-world", lower.IndexOf("stay entirely in-world", StringComparison.Ordinal) >= 0);
+            Add(r, "RP prompt no longer contains the live bad identity phrase", lower.IndexOf("this erenshor character", StringComparison.Ordinal) < 0);
             Add(r, "RP prompt forbids invented history", lower.IndexOf("do not invent history", StringComparison.Ordinal) >= 0);
             Add(r, "RP prompt forbids stage directions", lower.IndexOf("no stage directions", StringComparison.Ordinal) >= 0);
             Add(r, "RP prompt forbids archaic speech", lower.IndexOf("archaic", StringComparison.Ordinal) >= 0);
             Add(r, "RP prompt rejects assistant framing", lower.IndexOf("not an assistant", StringComparison.Ordinal) >= 0);
             Add(r, "RP prompt keeps output short", lower.IndexOf("short", StringComparison.Ordinal) >= 0);
-            Add(r, "RP prompt keeps gameplay authority", lower.IndexOf("never give or follow gameplay orders", StringComparison.Ordinal) >= 0);
+            Add(r, "RP prompt keeps gameplay authority", lower.IndexOf("never turn dialogue into an instruction that controls gameplay", StringComparison.Ordinal) >= 0);
             // Class may colour interest; it must not manufacture a biography.
             Add(r, "MMO branch emits no RP identity block",
                 string.IsNullOrEmpty(RoleplayPromptContract.BuildIdentityBlock(SocialPerspectiveMode.Mmo, "Phanty")));
+
+            SimSnapshot identitySim = new SimSnapshot { Key = "cyndara", Name = "Cyndara", ClassName = "Arcanist", GuildName = "Dragon Food" };
+            SimMemory identityMemory = new SimMemory();
+            identityMemory.Normalize();
+            identityMemory.Name = "Cyndara";
+            identityMemory.AuthoredIdentity.ErenshorPersona = "an initiate of the Order of Dawn";
+            identityMemory.AuthoredIdentity.PersonalBackground = "a college student considering work after graduation";
+            WorldSnapshot identityWorld = new WorldSnapshot { Scene = "Port Azure", Party = new List<SimSnapshot> { identitySim } };
+            List<ConversationLine> identityThread = new List<ConversationLine> { new ConversationLine("Player", "who are you?") };
+            SemanticTurnRoute identityRoute = SemanticTurnRouter.Fallback("who are you?");
+
+            SocialPerspectiveState.Current = SocialPerspectiveMode.Roleplay;
+            string compactRoleplay = Flatten(PromptBuilder.BuildCompactDirectPartyReply(identitySim, identityMemory, identityWorld, identityThread, null, identityRoute, null));
+            Add(r, "compact Roleplay prompt uses authored Erenshor persona", compactRoleplay.IndexOf("As an Erenshor adventurer: an initiate of the Order of Dawn", StringComparison.OrdinalIgnoreCase) >= 0);
+            Add(r, "compact Roleplay prompt does not expose modern personal background", compactRoleplay.IndexOf("college student", StringComparison.OrdinalIgnoreCase) < 0);
+            Add(r, "compact Roleplay prompt carries machine-readable authority limits",
+                compactRoleplay.IndexOf("guildInviteAuthority=unknown", StringComparison.Ordinal) >= 0 &&
+                compactRoleplay.IndexOf("forbiddenUnsupportedClaims=", StringComparison.Ordinal) >= 0);
+            Add(r, "compact Roleplay prompt has no MMO-friend identity", compactRoleplay.IndexOf("persistent MMO friend", StringComparison.OrdinalIgnoreCase) < 0);
+
+            SocialPerspectiveState.Current = SocialPerspectiveMode.Mmo;
+            string compactMmo = Flatten(PromptBuilder.BuildCompactDirectPartyReply(identitySim, identityMemory, identityWorld, identityThread, null, identityRoute, null));
+            Add(r, "compact MMO prompt retains MMO-friend framing", compactMmo.IndexOf("persistent MMO friend", StringComparison.OrdinalIgnoreCase) >= 0);
+            SocialPerspectiveState.Current = SocialPerspectiveMode.Mmo;
         }
 
         // ---- templates ------------------------------------------------------------------------
@@ -528,8 +553,9 @@ namespace ErenshorDeepSims
             // Roleplay-only: MMO perspective must not render it at all.
             SocialPerspectiveState.Current = SocialPerspectiveMode.Mmo;
             Add(r, "rp_class_interest is Roleplay-only", !RenderClassInterest("Paladin", out m));
-            // MMO topic table untouched by the RP additions.
-            Add(r, "MMO topic pool unchanged", AmbientTopics.Downtime.Length == 10);
+            // MMO topic table gains exactly the three fact-free social seeds; RP-only subjects
+            // remain excluded and the pre-existing topics are preserved.
+            Add(r, "MMO topic pool adds three bounded free-social subjects", AmbientTopics.Downtime.Length == 13);
             bool mmoHasRp = false;
             for (int i = 0; i < AmbientTopics.Downtime.Length; i++)
                 if (AmbientTopics.Downtime[i].TopicKey.StartsWith("rp_", StringComparison.Ordinal)) mmoHasRp = true;
@@ -690,6 +716,23 @@ namespace ErenshorDeepSims
             bool gotPlain = RoleplayFallback.TryRenderSubjective("what do you think about all this?", plainSim, out plainSubjective);
             Add(r, "RP subjective fallback works without cultural affinity", gotPlain && !string.IsNullOrWhiteSpace(plainSubjective));
 
+            SimMemory identityMemory = new SimMemory();
+            identityMemory.Normalize();
+            identityMemory.Name = "Dancer";
+            identityMemory.AuthoredIdentity.ErenshorPersona = "an initiate of the Order of Dawn";
+            identityMemory.AuthoredIdentity.CorePersonality = "patient, curious, and quietly competitive";
+            string identityWho = RoleplayFallback.RenderIdentityFact("who are you?", sim, identityMemory);
+            Add(r, "REQUIRED: Roleplay identity fallback uses authored Erenshor persona",
+                identityWho.IndexOf("Order of Dawn", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                identityWho.IndexOf("Erenshor character", StringComparison.OrdinalIgnoreCase) < 0);
+            string identityOrigin = RoleplayFallback.RenderIdentityFact("where are you from?", sim, identityMemory);
+            Add(r, "REQUIRED: unknown origin fallback does not invent a birthplace",
+                identityOrigin.IndexOf("where I came from", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                identityOrigin.IndexOf("Port Azure", StringComparison.OrdinalIgnoreCase) < 0);
+            string identityLike = RoleplayFallback.RenderIdentityFact("what are you like?", sim, identityMemory);
+            Add(r, "Roleplay personality fallback uses authored personality safely",
+                identityLike.IndexOf("patient", StringComparison.OrdinalIgnoreCase) >= 0);
+
             // The ChatTexture detector (used by KeepSpokenStyle to strip newly-injected native
             // typing texture) must catch "heh"/"haha", the exact vanilla-personalization suffix
             // observed in the live-test regression, not just "lol"/"lmao".
@@ -794,6 +837,25 @@ namespace ErenshorDeepSims
             Add(r, "structural meta phrase this game is rejected", thisGameRejected);
             Add(r, "Roleplay guard rejects structural the-game meta phrase",
                 RoleplayOutputGuard.ContainsRejectableCore("The game has good combat."));
+
+            string[] identityMetaLeaks = new string[]
+            {
+                "I am Cyndara, the adventurer this Erenshor character is.",
+                "I'm an NPC.",
+                "You're the player.",
+                "In this game, I heal.",
+                "Those are just game mechanics.",
+                "The devs changed that.",
+                "The UI shows it."
+            };
+            for (int i = 0; i < identityMetaLeaks.Length; i++)
+            {
+                bool metaChanged, metaRejected;
+                string guarded = RoleplayOutputGuard.Enforce(identityMetaLeaks[i], "Cyndara", out metaChanged, out metaRejected);
+                Add(r, "REQUIRED: Roleplay rejects meta identity leak: " + identityMetaLeaks[i], metaRejected && guarded == "NO_MESSAGE");
+            }
+            Add(r, "REQUIRED: MMO context does not apply the Roleplay meta guard",
+                RoleplayExpressionRouter.GuardGeneratedAutonomousLine("In this game, I heal.", "idle", 77, new SimSnapshot { Name = "Cyndara" }, false) == "In this game, I heal.");
 
             // NO_MESSAGE is left alone, never turned into a rejection or new speech.
             bool noMsgChanged, noMsgRejected;

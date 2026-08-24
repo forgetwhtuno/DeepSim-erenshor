@@ -175,7 +175,7 @@ namespace ErenshorDeepSims
             source.SimRelationships.Add(new SimRelationshipMemory { OtherSimKey = "Phanty", OtherName = "Phanty", SharedOutings = 8, SharedMinutes = 95, SharedConversationThreads = 6 });
             RefreshPlayer(source, new SimSnapshot { Rival = true });
             RefreshPair(source.SimRelationships[0], new SimSnapshot { Rival = true }, new SimSnapshot());
-            SimMemory reloaded = JsonUtil.Clone(source);
+            SimMemory reloaded = SimMemoryPersistence.Clone(source);
             if (reloaded != null) reloaded.Normalize();
             bool persisted = reloaded != null && reloaded.RelationshipDataVersion == CurrentVersion &&
                 reloaded.VerifiedPracticeDuels == 1 && reloaded.SimRelationships != null && reloaded.SimRelationships.Count == 1 &&

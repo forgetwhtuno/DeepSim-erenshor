@@ -67,13 +67,18 @@ namespace ErenshorDeepSims
                         memory.RecentEvents = new List<MemoryEvent>();
                         memory.ImportantMemories = new List<string>();
                         memory.Conversation = new List<ChatMessage>();
-                        AddImportantUnsafe(memory, "First adventured with the player around " + FriendlyDate() + ".");
+                        AddImportantUnsafe(memory, "First observed by Deep Sims around " + FriendlyDate() + ".");
                     }
                     memory.Normalize();
                     _cache[sim.Key] = memory;
                 }
 
                 UpdateSnapshotUnsafe(memory, sim);
+                // Prompt reads are an identity-system initialization boundary, not merely a cache
+                // lookup. Generated fictional-player identity must exist before the first MMO IRL
+                // question even when this Sim has never been selected in the Identity Editor.
+                SimulatedPlayerBackgroundPolicy.Ensure(memory, sim);
+                GeneratedIdentityMotivationPolicy.Ensure(memory, sim);
                 MarkDirtyUnsafe(memory);
                 return CloneMemory(memory);
             }
@@ -85,7 +90,15 @@ namespace ErenshorDeepSims
             {
                 SimMemory memory;
                 if (_cache.TryGetValue(simKey, out memory))
-                    return memory.GroupSessions > 0 || memory.Conversation.Count > 0 || memory.ImportantMemories.Count > 1;
+                {
+                    IdentitySchema.Normalize(memory);
+                    AuthoredIdentityProfile a = memory.AuthoredIdentity;
+                    return memory.GroupSessions > 0 || memory.Conversation.Count > 0 || memory.ImportantMemories.Count > 1 ||
+                        memory.StructuredMemories.Count > 0 || !string.IsNullOrWhiteSpace(a.CorePersonality) ||
+                        !string.IsNullOrWhiteSpace(a.PersonalBackground) || !string.IsNullOrWhiteSpace(a.ErenshorPersona) ||
+                        !string.IsNullOrWhiteSpace(a.RelationshipToPlayer) || !string.IsNullOrWhiteSpace(a.LongTermWants) ||
+                        !string.IsNullOrWhiteSpace(a.CaresAbout) || a.SharedHistory.Count > 0 || a.PinnedMemories.Count > 0;
+                }
                 return File.Exists(GetPath(simKey));
             }
         }
@@ -106,6 +119,21 @@ namespace ErenshorDeepSims
                 if (_cache.TryGetValue(sim.Key, out memory) && memory != null) return memory.Familiarity;
             }
             return 0f;
+        }
+
+        internal string GetRecentLifeIdentityInfluence(string simName, string simKey)
+        {
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(simKey ?? string.Empty, out memory) || memory == null)
+                    memory = FindMemoryUnsafe(string.IsNullOrWhiteSpace(simKey) ? simName : simKey);
+                if (memory == null) return string.Empty;
+                memory.Normalize();
+                AuthoredIdentityProfile identity = memory.AuthoredIdentity;
+                return (identity.CorePersonality + " " + identity.PersonalBackground + " " + identity.LongTermWants + " " +
+                    identity.CaresAbout + " " + memory.GeneratedLongTermWants + " " + memory.GeneratedCaresAbout).Trim();
+            }
         }
 
         internal RelationshipTone GetRelationshipTone(SimSnapshot sim, string otherSimName)
@@ -422,7 +450,7 @@ namespace ErenshorDeepSims
                 {
                     int start = Math.Max(0, memory.OutingSummaries.Count - 2);
                     for (int i = start; i < memory.OutingSummaries.Count; i++)
-                        if (!string.IsNullOrWhiteSpace(memory.OutingSummaries[i])) lines.Add("Outing: " + memory.OutingSummaries[i]);
+                        if (!string.IsNullOrWhiteSpace(memory.OutingSummaries[i])) lines.Add("Outing: " + VerifiedOutingHistoryPolicy.SanitizeForPrompt(memory.OutingSummaries[i]));
                 }
                 if (memory.ConversationSummaries != null && memory.ConversationSummaries.Count > 0)
                 {
@@ -486,7 +514,7 @@ namespace ErenshorDeepSims
                 string[] files = Directory.GetFiles(_directory, "*.json");
                 for (int i = 0; i < files.Length; i++)
                 {
-                    SimMemory candidate = JsonUtil.ReadFile<SimMemory>(files[i]);
+                    SimMemory candidate = SimMemoryPersistence.ReadFile(files[i]);
                     if (candidate == null) continue;
                     candidate.Normalize();
                     if (string.Equals(candidate.Name, wanted, StringComparison.OrdinalIgnoreCase) ||
@@ -560,12 +588,14 @@ namespace ErenshorDeepSims
                     memory.RecentEvents = new List<MemoryEvent>();
                     memory.ImportantMemories = new List<string>();
                     memory.Conversation = new List<ChatMessage>();
-                    AddImportantUnsafe(memory, "First adventured with the player around " + FriendlyDate() + ".");
+                    AddImportantUnsafe(memory, "First observed by Deep Sims around " + FriendlyDate() + ".");
                 }
                 memory.Normalize();
                 _cache[sim.Key] = memory;
             }
             UpdateSnapshotUnsafe(memory, sim);
+            if (SimulatedPlayerBackgroundPolicy.Ensure(memory, sim)) MarkDirtyUnsafe(memory);
+            if (GeneratedIdentityMotivationPolicy.Ensure(memory, sim)) MarkDirtyUnsafe(memory);
             return memory;
         }
 
@@ -633,6 +663,16 @@ namespace ErenshorDeepSims
             memory.RecentEvents.Add(evt);
             if (memory.RecentEvents.Count > 30)
                 memory.RecentEvents.RemoveRange(0, memory.RecentEvents.Count - 30);
+
+            // New structured episodic representation. The legacy RecentEvents list remains intact so
+            // old installs and diagnostics keep their exact behavior; this parallel record adds
+            // explicit provenance/ownership/importance for bounded retrieval.
+            IdentitySchema.Normalize(memory);
+            StructuredMemoryRecord structured = IdentitySchema.Create("episodic", text, importance, false, false,
+                memory.SimKey, memory.Name, "verified_event:" + (string.IsNullOrWhiteSpace(type) ? "event" : type));
+            memory.StructuredMemories.Add(structured);
+            if (memory.StructuredMemories.Count > 48)
+                memory.StructuredMemories.RemoveRange(0, memory.StructuredMemories.Count - 48);
         }
 
         private void AddImportantUnsafe(SimMemory memory, string text)
@@ -649,10 +689,13 @@ namespace ErenshorDeepSims
             if (!File.Exists(path)) return null;
             try
             {
-                SimMemory memory = JsonUtil.ReadFile<SimMemory>(path);
+                SimMemory memory = SimMemoryPersistence.ReadFile(path);
                 if (memory != null)
                 {
                     memory.Normalize();
+                    CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=reload scope=" +
+                        CognitionObservability.IdentityToken(memory.SimKey) + " " +
+                        MemoryCollectionObservation.Capture(memory).Describe());
                     if (MigrateLegacyDialogueUnsafe(memory)) MarkDirtyUnsafe(memory);
                 }
                 return memory;
@@ -763,7 +806,15 @@ namespace ErenshorDeepSims
                 {
                     SimMemory memory;
                     if (_cache.TryGetValue(key, out memory) && memory != null)
-                        batch[key] = CloneMemory(memory);
+                    {
+                        MemoryCollectionObservation live = MemoryCollectionObservation.Capture(memory);
+                        SimMemory clone = CloneMemory(memory);
+                        MemoryCollectionObservation cloned = MemoryCollectionObservation.Capture(clone);
+                        string token = CognitionObservability.IdentityToken(memory.SimKey);
+                        CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=live scope=" + token + " " + live.Describe());
+                        CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=clone scope=" + token + " " + cloned.Describe());
+                        batch[key] = clone;
+                    }
                     taken.Add(key);
                     if (taken.Count >= Math.Max(1, maxCount)) break;
                 }
@@ -843,7 +894,14 @@ namespace ErenshorDeepSims
             {
                 if (_writeAttemptGate != null && !_writeAttemptGate(memory))
                     throw new IOException("simulated transient memory-write failure");
-                JsonUtil.WriteFile(temp, memory);
+                string token = CognitionObservability.IdentityToken(memory.SimKey);
+                CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=pre_json scope=" + token + " " +
+                    MemoryCollectionObservation.Capture(memory).Describe());
+                CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=dto scope=" + token + " " +
+                    SimMemoryPersistence.CaptureDto(memory).Describe());
+                JsonWriteObservation serialized = SimMemoryPersistence.WriteFile(temp, memory);
+                if (serialized != null && serialized.Fields != null)
+                    CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=json scope=" + token + " " + serialized.Fields.Describe());
                 if (File.Exists(path))
                 {
                     try { File.Replace(temp, path, null); }
@@ -856,6 +914,16 @@ namespace ErenshorDeepSims
                     }
                 }
                 else File.Move(temp, path);
+                try
+                {
+                    JsonFieldPresenceObservation disk = JsonFieldPresenceObservation.Inspect(File.ReadAllText(path, Encoding.UTF8));
+                    CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=disk scope=" + token + " " + disk.Describe());
+                }
+                catch (Exception readbackEx)
+                {
+                    CognitionObservability.SafeInfo(_log, "[DeepSims][MemoryPersistence] phase=disk scope=" + token +
+                        " readback=false error=" + DiagnosticPrivacy.ExceptionType(readbackEx));
+                }
                 return true;
             }
             catch (Exception ex)
@@ -866,9 +934,9 @@ namespace ErenshorDeepSims
             }
         }
 
-        internal void RecordExpressedPreference(SimSnapshot sim, string topicKey, string statement)
+        internal bool RecordExpressedPreference(SimSnapshot sim, string topicKey, string statement)
         {
-            if (sim == null || !PreferenceMemoryPolicy.IsEligible(topicKey, statement)) return;
+            if (sim == null || !PreferenceMemoryPolicy.IsEligible(topicKey, statement)) return false;
             lock (_ioLock)
             {
                 SimMemory memory = GetOrCreateUnsafe(sim);
@@ -892,7 +960,688 @@ namespace ErenshorDeepSims
                 memory.Preferences.Add(existing);
                 if (memory.Preferences.Count > 8) memory.Preferences.RemoveRange(0, memory.Preferences.Count - 8);
                 MarkDirtyUnsafe(memory);
+                return true;
             }
+        }
+
+
+        internal List<string> InspectIdentity(SimSnapshot live, string nameOrKey)
+        {
+            lock (_ioLock)
+            {
+                SimMemory memory = live != null ? GetOrCreateUnsafe(live) : FindMemoryUnsafe(nameOrKey);
+                List<string> lines = new List<string>();
+                if (memory == null) return lines;
+                IdentitySchema.Normalize(memory);
+                if (live == null)
+                {
+                    live = new SimSnapshot
+                    {
+                        Key = memory.SimKey, Name = memory.Name, ClassName = memory.LastKnownClass, Level = memory.LastKnownLevel,
+                        Scene = memory.LastKnownScene, Personality = memory.LastKnownPersonality, AssignedRoles = new List<string>(), DialogueExamples = new List<string>()
+                    };
+                }
+                IdentityEditorModel model = IdentityEditorModelBuilder.Build(live, CloneMemory(memory));
+                lines.Add(memory.Name + " | layered identity | schema=" + memory.IdentityDataVersion);
+                lines.Add("Verified context: " + model.VerifiedContext);
+                lines.Add("Default profile: " + model.DefaultSummary);
+                lines.Add("Personality [" + model.Personality.SourceLabel + "]: " + model.Personality.EffectiveText);
+                lines.Add("Personal background [" + model.Background.SourceLabel + "]: " + model.Background.EffectiveText);
+                lines.Add("Erenshor persona [" + model.Persona.SourceLabel + "]: " + model.Persona.EffectiveText);
+                lines.Add("Relationship [" + model.Relationship.SourceLabel + "]: " + model.Relationship.EffectiveText);
+                lines.Add("Authored history: " + model.AuthoredHistory.Count + " | shared history: " + model.SharedHistory.Count + " | pinned: " + model.Pinned.Count + " | learned structured: " + model.Learned.Count);
+                return lines;
+            }
+        }
+
+        internal IdentityEditorModel GetIdentityEditorModel(SimSnapshot live)
+        {
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) return new IdentityEditorModel();
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                return IdentityEditorModelBuilder.Build(live, CloneMemory(memory));
+            }
+        }
+
+        internal AuthoredIdentityProfile GetAuthoredIdentityProfile(SimSnapshot live)
+        {
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) return new AuthoredIdentityProfile();
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                return IdentitySchema.CloneProfile(memory.AuthoredIdentity);
+            }
+        }
+
+        internal bool TrySaveAuthoredIdentity(SimSnapshot live, AuthoredIdentityProfile draft, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            if (draft == null) { result = "Identity draft is missing."; return false; }
+            string personality, background, persona, relationship, wants, cares;
+            if (!TryBoundAuthoredField(draft.CorePersonality, out personality, out result) ||
+                !TryBoundAuthoredField(draft.PersonalBackground, out background, out result) ||
+                !TryBoundAuthoredField(draft.ErenshorPersona, out persona, out result) ||
+                !TryBoundAuthoredField(draft.RelationshipToPlayer, out relationship, out result) ||
+                !TryBoundAuthoredField(draft.LongTermWants, out wants, out result) ||
+                !TryBoundAuthoredField(draft.CaresAbout, out cares, out result)) return false;
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                memory.AuthoredIdentity.CorePersonality = personality;
+                memory.AuthoredIdentity.PersonalBackground = background;
+                memory.AuthoredIdentity.ErenshorPersona = persona;
+                memory.AuthoredIdentity.RelationshipToPlayer = relationship;
+                memory.AuthoredIdentity.LongTermWants = wants;
+                memory.AuthoredIdentity.CaresAbout = cares;
+                MarkDirtyUnsafe(memory);
+                result = "Saved authored identity overrides for " + memory.Name + ". Empty fields continue using deterministic defaults.";
+                return true;
+            }
+        }
+
+        internal bool TryResetAllAuthoredIdentity(SimSnapshot live, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                memory.AuthoredIdentity.CorePersonality = string.Empty;
+                memory.AuthoredIdentity.PersonalBackground = string.Empty;
+                memory.AuthoredIdentity.ErenshorPersona = string.Empty;
+                memory.AuthoredIdentity.RelationshipToPlayer = string.Empty;
+                memory.AuthoredIdentity.LongTermWants = string.Empty;
+                memory.AuthoredIdentity.CaresAbout = string.Empty;
+                MarkDirtyUnsafe(memory);
+                result = "Reset all authored identity fields for " + memory.Name + ". Authored history, pinned memory, and learned memory were preserved.";
+                return true;
+            }
+        }
+
+        internal bool TryUpdateAuthoredMemory(SimSnapshot live, IdentityMemorySection section, string recordId, string text, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string clean;
+            if (!TryBoundMemoryText(text, out clean, out result)) return false;
+            string id = (recordId ?? string.Empty).Trim();
+            if (id.Length == 0) { result = "Memory id is missing."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory owner = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(owner);
+                if (section == IdentityMemorySection.PinnedAuthored)
+                {
+                    StructuredMemoryRecord record = FindRecord(owner.AuthoredIdentity.PinnedMemories, id);
+                    if (record == null || !record.Authored) { result = "Authored pinned memory was not found."; return false; }
+                    RewriteRecord(record, clean);
+                    MarkDirtyUnsafe(owner);
+                    result = "Updated authored pinned memory.";
+                    return true;
+                }
+                if (section == IdentityMemorySection.AuthoredHistory)
+                {
+                    StructuredMemoryRecord record = FindRecord(owner.AuthoredIdentity.SharedHistory, id);
+                    if (record == null || !record.Authored || IdentityEditorModelBuilder.IsSharedHistoryRecord(record))
+                    { result = "Authored history was not found."; return false; }
+                    RewriteRecord(record, clean);
+                    MarkDirtyUnsafe(owner);
+                    result = "Updated authored history.";
+                    return true;
+                }
+                if (section == IdentityMemorySection.SharedHistory)
+                {
+                    StructuredMemoryRecord selected = FindRecord(owner.AuthoredIdentity.SharedHistory, id);
+                    if (selected == null || !selected.Authored || !IdentityEditorModelBuilder.IsSharedHistoryRecord(selected)) { result = "Authored shared history was not found."; return false; }
+                    int changed = 0;
+                    List<SimMemory> memories = LoadAllMemoriesUnsafe();
+                    for (int i = 0; i < memories.Count; i++)
+                    {
+                        StructuredMemoryRecord record = FindRecord(memories[i].AuthoredIdentity.SharedHistory, id);
+                        if (record == null || !record.Authored) continue;
+                        RewriteRecord(record, clean);
+                        MarkDirtyUnsafe(memories[i]);
+                        changed++;
+                    }
+                    result = "Updated authored history" + (changed > 1 ? " for all " + changed + " KnownBy copies." : ".");
+                    return changed > 0;
+                }
+                result = "Learned memory cannot be edited in place. Copy it to an authored pinned memory instead.";
+                return false;
+            }
+        }
+
+        internal bool TryRemoveAuthoredMemory(SimSnapshot live, IdentityMemorySection section, string recordId, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string id = (recordId ?? string.Empty).Trim();
+            if (id.Length == 0) { result = "Memory id is missing."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory owner = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(owner);
+                if (section == IdentityMemorySection.PinnedAuthored)
+                {
+                    bool removed = RemoveRecord(owner.AuthoredIdentity.PinnedMemories, id, true);
+                    if (!removed) { result = "Authored pinned memory was not found."; return false; }
+                    MarkDirtyUnsafe(owner);
+                    result = "Removed authored pinned memory. Learned memory was not changed.";
+                    return true;
+                }
+                if (section == IdentityMemorySection.AuthoredHistory)
+                {
+                    StructuredMemoryRecord record = FindRecord(owner.AuthoredIdentity.SharedHistory, id);
+                    if (record == null || !record.Authored || IdentityEditorModelBuilder.IsSharedHistoryRecord(record))
+                    { result = "Authored history was not found."; return false; }
+                    if (!RemoveRecord(owner.AuthoredIdentity.SharedHistory, id, true)) { result = "Authored history was not found."; return false; }
+                    MarkDirtyUnsafe(owner);
+                    result = "Removed authored history. Learned memory was not changed.";
+                    return true;
+                }
+                if (section == IdentityMemorySection.SharedHistory)
+                {
+                    StructuredMemoryRecord selected = FindRecord(owner.AuthoredIdentity.SharedHistory, id);
+                    if (selected == null || !selected.Authored || !IdentityEditorModelBuilder.IsSharedHistoryRecord(selected)) { result = "Authored shared history was not found."; return false; }
+                    int removed = 0;
+                    List<SimMemory> memories = LoadAllMemoriesUnsafe();
+                    for (int i = 0; i < memories.Count; i++)
+                    {
+                        if (!RemoveRecord(memories[i].AuthoredIdentity.SharedHistory, id, true)) continue;
+                        MarkDirtyUnsafe(memories[i]);
+                        removed++;
+                    }
+                    result = "Removed authored history" + (removed > 1 ? " from all " + removed + " KnownBy copies." : ".");
+                    return removed > 0;
+                }
+                result = "Learned memory is removed with Forget, not authored-memory Remove.";
+                return false;
+            }
+        }
+
+        internal bool TryForgetLearnedMemory(SimSnapshot live, string recordId, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string id = (recordId ?? string.Empty).Trim();
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                for (int i = memory.StructuredMemories.Count - 1; i >= 0; i--)
+                {
+                    StructuredMemoryRecord record = memory.StructuredMemories[i];
+                    if (record == null || !string.Equals(record.Id, id, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (record.Authored) { result = "Authored memory cannot be forgotten through the learned-memory path."; return false; }
+                    memory.StructuredMemories.RemoveAt(i);
+                    MarkDirtyUnsafe(memory);
+                    result = "Forgot learned structured memory. Authored identity/history were preserved.";
+                    return true;
+                }
+                result = "Learned structured memory was not found.";
+                return false;
+            }
+        }
+
+        internal bool TryCopyLearnedToPinned(SimSnapshot live, string recordId, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string id = (recordId ?? string.Empty).Trim();
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                StructuredMemoryRecord learned = FindRecord(memory.StructuredMemories, id);
+                if (learned == null || learned.Authored) { result = "Learned structured memory was not found."; return false; }
+                if (memory.AuthoredIdentity.PinnedMemories.Count >= 128) { result = "Pinned-memory limit reached (128)."; return false; }
+                StructuredMemoryRecord copy = IdentitySchema.Create("authored_pinned", learned.Text, 100, true, true, memory.SimKey, memory.Name, "player_authored_from_learned");
+                memory.AuthoredIdentity.PinnedMemories.Add(copy);
+                memory.AuthoredIdentity.Normalize();
+                MarkDirtyUnsafe(memory);
+                result = "Copied learned memory into an authored pinned memory. The learned source remains unchanged.";
+                return true;
+            }
+        }
+
+        internal bool TrySetAuthoredField(SimSnapshot live, string field, string value, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string rawValue = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (rawValue.Length > 900) { result = "Authored text is too long (maximum 900 characters); nothing was changed."; return false; }
+            string clean = IdentitySchema.Bound(rawValue, 900);
+            if (string.IsNullOrWhiteSpace(clean)) { result = "Authored text cannot be empty; use clear instead."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                string f = (field ?? string.Empty).Trim().ToLowerInvariant();
+                if (f == "personality" || f == "core") memory.AuthoredIdentity.CorePersonality = clean;
+                else if (f == "background" || f == "personal") memory.AuthoredIdentity.PersonalBackground = clean;
+                else if (f == "persona" || f == "erenshor") memory.AuthoredIdentity.ErenshorPersona = clean;
+                else if (f == "relationship" || f == "player") memory.AuthoredIdentity.RelationshipToPlayer = clean;
+                else if (f == "wants" || f == "concerns" || f == "goals") memory.AuthoredIdentity.LongTermWants = clean;
+                else if (f == "cares" || f == "interests") memory.AuthoredIdentity.CaresAbout = clean;
+                else { result = "Unknown field. Use personality, background, persona, relationship, wants, or cares."; return false; }
+                MarkDirtyUnsafe(memory);
+                result = "Updated authored " + f + " for " + memory.Name + ".";
+                return true;
+            }
+        }
+
+        internal bool TryAddAuthoredMemory(SimSnapshot live, string kind, string text, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            string rawText = (text ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (rawText.Length > 700) { result = "Memory text is too long (maximum 700 characters); nothing was changed."; return false; }
+            string clean = IdentitySchema.Bound(rawText, 700);
+            if (string.IsNullOrWhiteSpace(clean)) { result = "Memory text cannot be empty."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                string k = (kind ?? string.Empty).Trim().ToLowerInvariant();
+                bool pinned = k == "pinned" || k == "pin";
+                bool history = k == "history" || k == "shared";
+                if (!pinned && !history) { result = "Unknown memory kind. Use history or pinned."; return false; }
+                List<StructuredMemoryRecord> authoredTarget = history ? memory.AuthoredIdentity.SharedHistory : memory.AuthoredIdentity.PinnedMemories;
+                if (authoredTarget.Count >= 128) { result = "Authored " + (history ? "history" : "pinned memory") + " limit reached (128). Clear entries before adding more; nothing was deleted."; return false; }
+                StructuredMemoryRecord record = IdentitySchema.Create(history ? "authored_history" : "authored_pinned", clean,
+                    pinned ? 100 : 90, true, pinned, memory.SimKey, memory.Name, "player_authored");
+                authoredTarget.Add(record);
+                memory.AuthoredIdentity.Normalize();
+                MarkDirtyUnsafe(memory);
+                result = "Added authoritative " + (history ? "history" : "pinned memory") + " for " + memory.Name + ".";
+                return true;
+            }
+        }
+
+        internal bool TryAddSharedHistory(IList<SimSnapshot> knowers, string text, out string result)
+        {
+            result = string.Empty;
+            if (knowers == null || knowers.Count < 2) { result = "At least two Sims are required for shared history."; return false; }
+            string rawText = (text ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (rawText.Length > 700) { result = "Shared history text is too long (maximum 700 characters); nothing was changed."; return false; }
+            string clean = IdentitySchema.Bound(rawText, 700);
+            if (string.IsNullOrWhiteSpace(clean)) { result = "Shared history text cannot be empty."; return false; }
+            lock (_ioLock)
+            {
+                List<SimMemory> memories = new List<SimMemory>();
+                List<string> knownBy = new List<string>();
+                List<string> participants = new List<string>();
+                knownBy.Add("player"); participants.Add("player");
+                for (int i = 0; i < knowers.Count; i++)
+                {
+                    SimSnapshot sim = knowers[i];
+                    if (sim == null || string.IsNullOrWhiteSpace(sim.Key)) continue;
+                    SimMemory memory = GetOrCreateUnsafe(sim);
+                    if (!memories.Contains(memory)) memories.Add(memory);
+                    AddUnique(knownBy, sim.Key); AddUnique(knownBy, sim.Name);
+                    AddUnique(participants, sim.Key); AddUnique(participants, sim.Name);
+                }
+                if (memories.Count < 2) { result = "Both Sims must be currently resolvable."; return false; }
+                for (int i = 0; i < memories.Count; i++)
+                {
+                    IdentitySchema.Normalize(memories[i]);
+                    if (memories[i].AuthoredIdentity.SharedHistory.Count >= 128)
+                    {
+                        result = "Shared-history limit reached for " + memories[i].Name + " (128). Nothing was changed or deleted.";
+                        return false;
+                    }
+                }
+                string sharedId = "shared-" + DateTime.UtcNow.Ticks.ToString("x");
+                for (int i = 0; i < memories.Count; i++)
+                {
+                    SimMemory memory = memories[i];
+                    IdentitySchema.Normalize(memory);
+                    StructuredMemoryRecord record = IdentitySchema.Create("authored_shared_history", clean, 95, true, false,
+                        memory.SimKey, memory.Name, "player_authored_shared");
+                    record.Id = sharedId;
+                    record.KnownBy = new List<string>(knownBy);
+                    record.Participants = new List<string>(participants);
+                    memory.AuthoredIdentity.SharedHistory.Add(record);
+                    memory.AuthoredIdentity.Normalize();
+                    MarkDirtyUnsafe(memory);
+                }
+                result = "Added authoritative shared history known by " + memories.Count + " Sims and the player.";
+                return true;
+            }
+        }
+
+        internal bool TryClearAuthored(SimSnapshot live, string field, out string result)
+        {
+            result = string.Empty;
+            if (live == null || string.IsNullOrWhiteSpace(live.Key)) { result = "Sim is not currently resolvable."; return false; }
+            lock (_ioLock)
+            {
+                SimMemory memory = GetOrCreateUnsafe(live);
+                IdentitySchema.Normalize(memory);
+                string f = (field ?? string.Empty).Trim().ToLowerInvariant();
+                if (f == "personality" || f == "core") memory.AuthoredIdentity.CorePersonality = string.Empty;
+                else if (f == "background" || f == "personal") memory.AuthoredIdentity.PersonalBackground = string.Empty;
+                else if (f == "persona" || f == "erenshor") memory.AuthoredIdentity.ErenshorPersona = string.Empty;
+                else if (f == "relationship" || f == "player") memory.AuthoredIdentity.RelationshipToPlayer = string.Empty;
+                else if (f == "history" || f == "shared")
+                {
+                    List<string> sharedIds = new List<string>();
+                    for (int i = 0; i < memory.AuthoredIdentity.SharedHistory.Count; i++)
+                    {
+                        StructuredMemoryRecord record = memory.AuthoredIdentity.SharedHistory[i];
+                        if (IdentityEditorModelBuilder.IsSharedHistoryRecord(record) && !string.IsNullOrWhiteSpace(record.Id)) AddUnique(sharedIds, record.Id);
+                    }
+                    List<SimMemory> all = LoadAllMemoriesUnsafe();
+                    for (int m = 0; m < all.Count; m++)
+                        for (int i = 0; i < sharedIds.Count; i++)
+                            if (RemoveRecord(all[m].AuthoredIdentity.SharedHistory, sharedIds[i], true)) MarkDirtyUnsafe(all[m]);
+                    memory.AuthoredIdentity.SharedHistory.Clear();
+                }
+                else if (f == "pinned" || f == "pin") memory.AuthoredIdentity.PinnedMemories.Clear();
+                else if (f == "all" || f == "identity")
+                {
+                    memory.AuthoredIdentity.CorePersonality = string.Empty;
+                    memory.AuthoredIdentity.PersonalBackground = string.Empty;
+                    memory.AuthoredIdentity.ErenshorPersona = string.Empty;
+                    memory.AuthoredIdentity.RelationshipToPlayer = string.Empty;
+                }
+                else { result = "Unknown field. Use personality, background, persona, relationship, history, pinned, or all."; return false; }
+                MarkDirtyUnsafe(memory);
+                result = "Cleared authored " + f + " for " + memory.Name + ". Learned memories were not deleted.";
+                return true;
+            }
+        }
+
+        private static bool TryBoundAuthoredField(string value, out string clean, out string result)
+        {
+            result = string.Empty;
+            string raw = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (raw.Length > 900) { clean = string.Empty; result = "Authored identity fields are limited to 900 characters."; return false; }
+            clean = IdentitySchema.Bound(raw, 900);
+            return true;
+        }
+
+        private static bool TryBoundMemoryText(string value, out string clean, out string result)
+        {
+            result = string.Empty;
+            string raw = (value ?? string.Empty).Replace("\r", " ").Replace("\n", " ").Trim();
+            if (raw.Length == 0) { clean = string.Empty; result = "Memory text cannot be empty."; return false; }
+            if (raw.Length > 700) { clean = string.Empty; result = "Memory text is too long (maximum 700 characters)."; return false; }
+            clean = IdentitySchema.Bound(raw, 700);
+            return true;
+        }
+
+        private static StructuredMemoryRecord FindRecord(List<StructuredMemoryRecord> records, string id)
+        {
+            if (records == null || string.IsNullOrWhiteSpace(id)) return null;
+            for (int i = 0; i < records.Count; i++)
+            {
+                StructuredMemoryRecord record = records[i];
+                if (record != null && string.Equals(record.Id, id, StringComparison.OrdinalIgnoreCase)) return record;
+            }
+            return null;
+        }
+
+        private static bool RemoveRecord(List<StructuredMemoryRecord> records, string id, bool requireAuthored)
+        {
+            if (records == null || string.IsNullOrWhiteSpace(id)) return false;
+            for (int i = records.Count - 1; i >= 0; i--)
+            {
+                StructuredMemoryRecord record = records[i];
+                if (record == null || !string.Equals(record.Id, id, StringComparison.OrdinalIgnoreCase)) continue;
+                if (requireAuthored && !record.Authored) return false;
+                records.RemoveAt(i);
+                return true;
+            }
+            return false;
+        }
+
+        private static void RewriteRecord(StructuredMemoryRecord record, string clean)
+        {
+            if (record == null) return;
+            record.Text = clean;
+            record.Topics = MemoryTopicPolicy.ExtractTopics(clean);
+            record.EmotionalTags = MemoryTopicPolicy.ExtractEmotionalTags(clean);
+            record.Normalize();
+        }
+
+        private List<SimMemory> LoadAllMemoriesUnsafe()
+        {
+            try
+            {
+                string[] files = Directory.GetFiles(_directory, "*.json");
+                for (int i = 0; i < files.Length; i++)
+                {
+                    try
+                    {
+                        SimMemory candidate = SimMemoryPersistence.ReadFile(files[i]);
+                        if (candidate == null || string.IsNullOrWhiteSpace(candidate.SimKey)) continue;
+                        candidate.Normalize();
+                        if (!_cache.ContainsKey(candidate.SimKey)) _cache[candidate.SimKey] = candidate;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+            List<SimMemory> result = new List<SimMemory>();
+            foreach (KeyValuePair<string, SimMemory> pair in _cache)
+            {
+                if (pair.Value == null) continue;
+                pair.Value.Normalize();
+                if (!result.Contains(pair.Value)) result.Add(pair.Value);
+            }
+            return result;
+        }
+
+        private static void AddUnique(List<string> values, string value)
+        {
+            if (values == null || string.IsNullOrWhiteSpace(value)) return;
+            for (int i = 0; i < values.Count; i++) if (string.Equals(values[i], value, StringComparison.OrdinalIgnoreCase)) return;
+            values.Add(value.Trim());
+        }
+
+        internal bool StoreSocialMemory(SimSnapshot owner, StructuredMemoryRecord record, out string decision)
+        {
+            decision = "rejected";
+            if (owner == null || string.IsNullOrWhiteSpace(owner.Key) || record == null) return false;
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(owner.Key, out memory) || memory == null) memory = GetOrCreateUnsafe(owner);
+                IdentitySchema.Normalize(memory);
+                record.Normalize();
+                if (string.IsNullOrWhiteSpace(record.OwnerSimKey)) record.OwnerSimKey = owner.Key;
+                if (string.IsNullOrWhiteSpace(record.OwnerSimName)) record.OwnerSimName = owner.Name;
+                if (!MemoryKnowledgePolicy.CanUse(record, owner)) { decision = "knowledge_denied"; return false; }
+
+                int recentLifeExpired = AgeSocialMemoriesUnsafe(memory, DateTime.UtcNow);
+                if (recentLifeExpired > 0)
+                    CognitionObservability.SafeInfo(_log, "[DeepSims][RecentLife] " + RecentLifeDiagnosticCounters.Describe());
+                StructuredMemoryRecord existing = null;
+                for (int i = memory.StructuredMemories.Count - 1; i >= 0; i--)
+                {
+                    StructuredMemoryRecord candidate = memory.StructuredMemories[i];
+                    if (candidate == null || candidate.Authored) continue;
+                    candidate.Normalize();
+                    if ((!string.IsNullOrWhiteSpace(record.Id) && string.Equals(candidate.Id, record.Id, StringComparison.Ordinal)) ||
+                        (!string.IsNullOrWhiteSpace(record.EpisodeId) && string.Equals(candidate.EpisodeId, record.EpisodeId, StringComparison.Ordinal) &&
+                         string.Equals(candidate.MemoryType, record.MemoryType, StringComparison.OrdinalIgnoreCase)))
+                    { existing = candidate; break; }
+                    if (!string.IsNullOrWhiteSpace(record.CallbackConcept) && !string.IsNullOrWhiteSpace(candidate.CallbackConcept) &&
+                        string.Equals(candidate.CallbackConcept, record.CallbackConcept, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(candidate.MemoryType, record.MemoryType, StringComparison.OrdinalIgnoreCase))
+                    { existing = candidate; break; }
+                }
+                if (existing != null)
+                {
+                    if (string.Equals(record.SourceSystem, RecentLifePolicy.SourceSystem, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(existing.Id, record.Id, StringComparison.Ordinal))
+                    { decision = "already_stored"; return true; }
+                    existing.Importance = Math.Max(existing.Importance, record.Importance);
+                    existing.RecurrenceCount = Math.Max(1, existing.RecurrenceCount) + 1;
+                    existing.HumorScore = Math.Max(existing.HumorScore, record.HumorScore);
+                    existing.ConflictScore = Math.Max(existing.ConflictScore, record.ConflictScore);
+                    if (record.InterpretationSummary.Length > 0) existing.InterpretationSummary = record.InterpretationSummary;
+                    if (record.Subject.Length > 0) existing.Subject = record.Subject;
+                    AddUnique(existing.EvidenceIds, record.EvidenceIds);
+                    AddUnique(existing.Participants, record.Participants);
+                    // Knowledge consolidation is an intersection, never a union. Repeated evidence
+                    // cannot silently broaden who is allowed to recall the memory.
+                    existing.KnownBy = IntersectIdentities(existing.KnownBy, record.KnownBy);
+                    if (SocialMemoryPolicy.CanPromoteInsideJoke(existing))
+                    {
+                        existing.InsideJoke = true;
+                        existing.MemoryTier = SocialMemoryPolicy.TierInsideJoke;
+                    }
+                    existing.Normalize();
+                    MarkDirtyUnsafe(memory);
+                    decision = existing.InsideJoke ? "merged_inside_joke" : "merged";
+                    return true;
+                }
+                memory.StructuredMemories.Add(record);
+                if (memory.StructuredMemories.Count > 48) memory.StructuredMemories.RemoveRange(0, memory.StructuredMemories.Count - 48);
+                MarkDirtyUnsafe(memory);
+                decision = "stored";
+                return true;
+            }
+        }
+
+        internal bool StoreSimulatedRecentLifeMemory(SimSnapshot owner, StructuredMemoryRecord record, out string decision)
+        {
+            decision = "rejected";
+            if (owner == null || string.IsNullOrWhiteSpace(owner.Key) || record == null) return false;
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(owner.Key, out memory) || memory == null)
+                {
+                    memory = LoadUnsafe(owner.Key);
+                    if (memory == null)
+                    {
+                        memory = new SimMemory { SimKey = owner.Key, Name = owner.Name };
+                        memory.Normalize();
+                    }
+                    _cache[owner.Key] = memory;
+                }
+                // Deliberately do not call GetOrCreateUnsafe/UpdateSnapshotUnsafe: an offline
+                // roleplay simulation is not a native observation and cannot write LastSeenUtc.
+                return StoreSocialMemory(owner, record, out decision);
+            }
+        }
+
+        internal bool ApplySocialRelationshipEpisode(SimSnapshot owner, string otherKey, string otherName, SocialEpisodeRecord episode)
+        {
+            if (owner == null || string.IsNullOrWhiteSpace(owner.Key) || episode == null || string.IsNullOrWhiteSpace(otherName)) return false;
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(owner.Key, out memory) || memory == null) memory = GetOrCreateUnsafe(owner);
+                memory.Normalize();
+                SocialRelationshipMemory relation = FindSocialRelationship(memory, otherKey, otherName, true);
+                if (!SocialRelationshipPolicy.Apply(relation, episode, owner.Key, owner.Name, otherKey, otherName)) return false;
+                MarkDirtyUnsafe(memory);
+                return true;
+            }
+        }
+
+        internal SocialRelationshipMemory GetSocialRelationship(SimSnapshot owner, string otherKey, string otherName)
+        {
+            if (owner == null || string.IsNullOrWhiteSpace(owner.Key)) return null;
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(owner.Key, out memory) || memory == null) memory = LoadUnsafe(owner.Key);
+                if (memory == null) return null;
+                memory.Normalize();
+                SocialRelationshipMemory found = FindSocialRelationship(memory, otherKey, otherName, false);
+                return CloneSocialRelationship(found);
+            }
+        }
+
+        internal List<StructuredMemoryRecord> GetSocialMemoryMetadata(SimSnapshot owner, int max)
+        {
+            List<StructuredMemoryRecord> result = new List<StructuredMemoryRecord>();
+            if (owner == null || string.IsNullOrWhiteSpace(owner.Key)) return result;
+            lock (_ioLock)
+            {
+                SimMemory memory;
+                if (!_cache.TryGetValue(owner.Key, out memory) || memory == null) memory = LoadUnsafe(owner.Key);
+                if (memory == null) return result;
+                memory.Normalize();
+                for (int i = memory.StructuredMemories.Count - 1; i >= 0 && result.Count < Math.Max(0, max); i--)
+                {
+                    StructuredMemoryRecord record = memory.StructuredMemories[i];
+                    if (record == null || !MemoryKnowledgePolicy.CanUse(record, owner)) continue;
+                    record.Normalize();
+                    if (!record.Source.StartsWith("social_", StringComparison.OrdinalIgnoreCase) && !record.InsideJoke) continue;
+                    result.Add(IdentitySchema.CloneRecords(new List<StructuredMemoryRecord> { record })[0]);
+                }
+            }
+            return result;
+        }
+
+        private static SocialRelationshipMemory FindSocialRelationship(SimMemory memory, string otherKey, string otherName, bool create)
+        {
+            if (memory == null) return null;
+            if (memory.SocialRelationships == null) memory.SocialRelationships = new List<SocialRelationshipMemory>();
+            for (int i = 0; i < memory.SocialRelationships.Count; i++)
+            {
+                SocialRelationshipMemory relation = memory.SocialRelationships[i]; if (relation == null) continue;
+                if ((!string.IsNullOrWhiteSpace(otherKey) && string.Equals(relation.OtherSimKey, otherKey, StringComparison.OrdinalIgnoreCase)) ||
+                    (!string.IsNullOrWhiteSpace(otherName) && string.Equals(relation.OtherName, otherName, StringComparison.OrdinalIgnoreCase))) return relation;
+            }
+            if (!create) return null;
+            SocialRelationshipMemory created = new SocialRelationshipMemory { OtherSimKey = otherKey ?? string.Empty, OtherName = otherName ?? string.Empty, AppliedEpisodeIds = new List<string>(), UpdatedUtc = UtcNow() };
+            created.Normalize(); memory.SocialRelationships.Add(created); return created;
+        }
+
+        private static SocialRelationshipMemory CloneSocialRelationship(SocialRelationshipMemory source)
+        {
+            if (source == null) return null; source.Normalize();
+            return new SocialRelationshipMemory { OtherSimKey = source.OtherSimKey, OtherName = source.OtherName, Familiarity = source.Familiarity,
+                Warmth = source.Warmth, Trust = source.Trust, Tension = source.Tension, Rivalry = source.Rivalry, MeaningfulEpisodes = source.MeaningfulEpisodes,
+                UpdatedUtc = source.UpdatedUtc, AppliedEpisodeIds = new List<string>(source.AppliedEpisodeIds) };
+        }
+
+        private static int AgeSocialMemoriesUnsafe(SimMemory memory, DateTime nowUtc)
+        {
+            if (memory == null || memory.StructuredMemories == null) return 0;
+            int recentLifeExpired = 0;
+            for (int i = memory.StructuredMemories.Count - 1; i >= 0; i--)
+            {
+                StructuredMemoryRecord record = memory.StructuredMemories[i];
+                if (record == null || record.Authored || record.Pinned) continue;
+                if (SocialMemoryPolicy.ShouldFade(record, nowUtc))
+                {
+                    bool recentLife = string.Equals(record.Source, RecentLifePolicy.Source, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(record.SourceSystem, RecentLifePolicy.SourceSystem, StringComparison.OrdinalIgnoreCase);
+                    memory.StructuredMemories.RemoveAt(i);
+                    if (recentLife) { RecentLifeDiagnosticCounters.Expired(); recentLifeExpired++; }
+                }
+            }
+            return recentLifeExpired;
+        }
+
+        private static List<string> IntersectIdentities(List<string> left, List<string> right)
+        {
+            List<string> result = new List<string>();
+            if (left == null || right == null || left.Count == 0 || right.Count == 0) return result;
+            for (int i = 0; i < left.Count; i++)
+                for (int j = 0; j < right.Count; j++)
+                    if (string.Equals(left[i], right[j], StringComparison.OrdinalIgnoreCase)) { AddUnique(result, left[i]); break; }
+            return result;
+        }
+
+        private static void AddUnique(List<string> target, List<string> source)
+        {
+            if (target == null || source == null) return;
+            for (int i = 0; i < source.Count; i++) AddUnique(target, source[i]);
         }
 
         private string GetPath(string simKey)
@@ -930,6 +1679,14 @@ namespace ErenshorDeepSims
             copy.CompetitivePlayerExchanges = source.CompetitivePlayerExchanges;
             copy.VerifiedPracticeDuels = source.VerifiedPracticeDuels;
             copy.RelationshipDataVersion = source.RelationshipDataVersion;
+            copy.IdentityDataVersion = source.IdentityDataVersion;
+            copy.GeneratedSimulatedPlayerBackground = source.GeneratedSimulatedPlayerBackground;
+            copy.GeneratedSimulatedPlayerBackgroundVersion = source.GeneratedSimulatedPlayerBackgroundVersion;
+            copy.GeneratedLongTermWants = source.GeneratedLongTermWants;
+            copy.GeneratedCaresAbout = source.GeneratedCaresAbout;
+            copy.GeneratedIdentityMotivationVersion = source.GeneratedIdentityMotivationVersion;
+            copy.AuthoredIdentity = IdentitySchema.CloneProfile(source.AuthoredIdentity);
+            copy.StructuredMemories = IdentitySchema.CloneRecords(source.StructuredMemories);
             copy.LastOutingUtc = source.LastOutingUtc;
             copy.TotalGroupedMinutes = source.TotalGroupedMinutes;
             copy.ImportantMemories = source.ImportantMemories == null ? new List<string>() : new List<string>(source.ImportantMemories);
@@ -972,6 +1729,20 @@ namespace ErenshorDeepSims
                         LastSharedUtc = item.LastSharedUtc
                     });
                 }
+            copy.SocialRelationships = new List<SocialRelationshipMemory>();
+            if (source.SocialRelationships != null)
+                for (int i = 0; i < source.SocialRelationships.Count; i++)
+                {
+                    SocialRelationshipMemory item = source.SocialRelationships[i];
+                    if (item == null) continue;
+                    item.Normalize();
+                    copy.SocialRelationships.Add(new SocialRelationshipMemory
+                    {
+                        OtherSimKey = item.OtherSimKey, OtherName = item.OtherName, Familiarity = item.Familiarity, Warmth = item.Warmth,
+                        Trust = item.Trust, Tension = item.Tension, Rivalry = item.Rivalry, MeaningfulEpisodes = item.MeaningfulEpisodes,
+                        UpdatedUtc = item.UpdatedUtc, AppliedEpisodeIds = new List<string>(item.AppliedEpisodeIds)
+                    });
+                }
             copy.Preferences = new List<SimPreferenceMemory>();
             if (source.Preferences != null)
                 for (int i = 0; i < source.Preferences.Count; i++)
@@ -989,6 +1760,8 @@ namespace ErenshorDeepSims
             copy.Normalize();
             return copy;
         }
+
+        internal static SimMemory CloneMemoryForDiagnostics(SimMemory source) { return CloneMemory(source); }
 
         private static string UtcNow() { return DateTime.UtcNow.ToString("o"); }
         private static string FriendlyDate() { return DateTime.Now.ToString("yyyy-MM-dd"); }

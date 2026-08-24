@@ -43,6 +43,7 @@ namespace ErenshorDeepSims
         private DateTime _lastRestUtc = DateTime.MinValue;
         private DateTime _lastZoneChangeUtc = DateTime.MinValue;
         private DateTime _lastLogUtc = DateTime.MinValue;
+        private DateTime _competitiveCombatSuppressedUntilUtc = DateTime.MinValue;
         private string _lastLogText = string.Empty;
         private string _currentZone = string.Empty;
         private string _playerName = string.Empty;
@@ -88,14 +89,28 @@ namespace ErenshorDeepSims
 
         internal void Observe(WorldSnapshot world, IList<SimSnapshot> active)
         {
-            lock (_lock) { ObserveLocked(world, active); }
+            Observe(world, active, true);
         }
 
-        private void ObserveLocked(WorldSnapshot world, IList<SimSnapshot> active)
+        internal void Observe(WorldSnapshot world, IList<SimSnapshot> active, bool gameplayReady)
+        {
+            lock (_lock) { ObserveLocked(world, active, gameplayReady); }
+        }
+
+        private void ObserveLocked(WorldSnapshot world, IList<SimSnapshot> active, bool gameplayReady)
         {
             if (world == null || active == null) return;
             DateTime now = UtcNow();
             _playerName = world.Player == null ? string.Empty : (world.Player.Name ?? string.Empty);
+
+            // Character readiness is the existing native gameplay boundary. Menu/loading scenes
+            // and unknown scene names can pause an outing, but can never start, relabel, or finish
+            // one. No replacement location is guessed during that gap.
+            if (!gameplayReady || !VerifiedOutingHistoryPolicy.IsDurableGameplayLocation(world.Scene))
+            {
+                if (_active) _lastObserveUtc = now;
+                return;
+            }
 
             if (active.Count == 0)
             {
@@ -142,6 +157,46 @@ namespace ErenshorDeepSims
             _lastObserveUtc = now;
         }
 
+        // Semantic PvP/Practice Duel integrations own those combat results. While one is active,
+        // generic HP, death, and kill proxies must not create a second PvE/close-call narrative.
+        internal void ObserveCompetitiveCombatEvent(string sourceSystem, string eventType, string reasonToken)
+        {
+            lock (_lock)
+            {
+                DateTime now = UtcNow();
+                string source = (sourceSystem ?? string.Empty).Trim().ToLowerInvariant();
+                string type = (eventType ?? string.Empty).Trim().ToLowerInvariant();
+                string reason = (reasonToken ?? string.Empty).Trim().ToLowerInvariant();
+                bool starts = (source == "pvp" && (type == "pvp_accepted" || type == "pvp_ambush")) ||
+                    (source == "duel" && (type == "duel_accepted" || type == "duel_started"));
+                bool terminal = (source == "pvp" && (type == "pvp_match_completed" || type == "pvp_cancelled" || type == "pvp_refused")) ||
+                    (source == "duel" && (type == "duel_completed" || type == "duel_cancelled" || type == "duel_declined" || type == "duel_request_rejected"));
+                if (starts) _competitiveCombatSuppressedUntilUtc = now.AddMinutes(60.0);
+                else if (terminal)
+                {
+                    // A hostile interruption is actual ordinary combat taking ownership back now.
+                    _competitiveCombatSuppressedUntilUtc = source == "duel" && reason == "hostile_interruption"
+                        ? now : now.AddSeconds(12.0);
+                }
+            }
+        }
+
+        private bool CompetitiveCombatOwnsGenericProxy(DateTime now)
+        {
+            return _competitiveCombatSuppressedUntilUtc != DateTime.MinValue && now < _competitiveCombatSuppressedUntilUtc;
+        }
+
+        internal bool ShouldSuppressGenericCombatEvent(string eventType)
+        {
+            lock (_lock)
+            {
+                string t = (eventType ?? string.Empty).Trim().ToLowerInvariant();
+                if (t != "player_death" && t != "sim_death" && t != "sim_low_health" &&
+                    t != "player_low_health" && t != "kill") return false;
+                return CompetitiveCombatOwnsGenericProxy(UtcNow());
+            }
+        }
+
         internal void MarkCombatActivity()
         {
             MarkCombatActivity(null, false);
@@ -158,6 +213,7 @@ namespace ErenshorDeepSims
             {
             if (!_active) return;
             DateTime now = UtcNow();
+            if (CompetitiveCombatOwnsGenericProxy(now)) return;
             string cleanTarget = string.IsNullOrWhiteSpace(targetName) ? string.Empty : CleanName(targetName, string.Empty);
             // ReduceHP does not expose its attacker. Neither proximity nor a chat line proves that
             // the party damaged this NPC, so named enemy damage fails closed. A future compatibility
@@ -205,6 +261,7 @@ namespace ErenshorDeepSims
             lock (_lock)
             {
             if (!_active) return;
+            if (CompetitiveCombatOwnsGenericProxy(UtcNow())) return;
             string name = CleanName(enemyName, "enemy");
             Increment(_kills, name, 1);
             if (!string.IsNullOrWhiteSpace(killerName)) Increment(_killsByKiller, CleanName(killerName, "party member"), 1);
@@ -352,6 +409,8 @@ namespace ErenshorDeepSims
             {
             if (!_active) return;
             string t = type == null ? string.Empty : type.ToLowerInvariant();
+            if (CompetitiveCombatOwnsGenericProxy(UtcNow()) &&
+                (t == "player_death" || t == "sim_death" || t == "sim_low_health" || t == "player_low_health" || t == "kill")) return;
             if (t == "player_death")
             {
                 _playerDeaths++;
@@ -548,7 +607,8 @@ namespace ErenshorDeepSims
             _lastProgressUtc = DateTime.MinValue;
             _lastRestUtc = DateTime.MinValue;
             _lastZoneChangeUtc = now;
-            _currentZone = world == null ? string.Empty : (world.Scene ?? string.Empty);
+            _currentZone = world == null || !VerifiedOutingHistoryPolicy.IsDurableGameplayLocation(world.Scene)
+                ? string.Empty : (world.Scene ?? string.Empty);
             _playerDeaths = 0;
             _playerCloseCalls = 0;
             _playerLowHealthCooldown = DateTime.MinValue;
@@ -721,10 +781,15 @@ namespace ErenshorDeepSims
         private string BuildSummary(int minutes)
         {
             // Keep long-term memory deliberately tiny: at most two compact sentences.
-            string zone = !string.IsNullOrWhiteSpace(_currentZone) ? _currentZone : "the current area";
             int totalKills = Sum(_kills);
             StringBuilder first = new StringBuilder();
-            first.Append("Grouped for about ").Append(minutes).Append(" minutes in ").Append(zone).Append(".");
+            first.Append("Grouped for about ").Append(minutes).Append(" minutes");
+            if (_zones.Count == 1)
+            {
+                foreach (string zone in _zones) { first.Append(" in ").Append(zone); break; }
+            }
+            else if (_zones.Count > 1) first.Append(" across multiple verified areas");
+            first.Append(".");
 
             List<string> details = new List<string>();
             if (totalKills > 0)
@@ -991,6 +1056,7 @@ namespace ErenshorDeepSims
 
         private void ObservePlayerLowHealth(PlayerSnapshot player, DateTime now)
         {
+            if (CompetitiveCombatOwnsGenericProxy(now)) return;
             if (player == null || player.HpPercent < 0f || player.IsDead) return;
             if (player.HpPercent > 25f) return;
             if (_playerLowHealthCooldown != DateTime.MinValue && (now - _playerLowHealthCooldown).TotalSeconds < 75) return;
@@ -1004,6 +1070,7 @@ namespace ErenshorDeepSims
 
         private void ObserveLowHealth(SimSnapshot sim, DateTime now)
         {
+            if (CompetitiveCombatOwnsGenericProxy(now)) return;
             if (sim == null) return;
             try
             {
@@ -1207,6 +1274,33 @@ namespace ErenshorDeepSims
             object value = ReadMember(obj, names);
             if (value == null) return 0f;
             try { return Convert.ToSingle(value); } catch { return 0f; }
+        }
+    }
+
+    internal static class VerifiedOutingHistoryPolicy
+    {
+        private static readonly Regex GeneratedOutingLocation = new Regex(
+            @"^(Grouped for about\s+\d+\s+minutes)\s+in\s+([^\.]+)\.(.*)$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        internal static bool IsDurableGameplayLocation(string scene)
+        {
+            if (string.IsNullOrWhiteSpace(scene)) return false;
+            string compact = Regex.Replace(scene.Trim().ToLowerInvariant(), @"[^a-z0-9]+", string.Empty);
+            return compact != "menu" && compact != "mainmenu" && compact != "loading" &&
+                compact != "loadingscene" && compact != "characterselect" && compact != "characterselection" &&
+                compact != "bootstrap" && compact != "initialization" && compact != "initializingscene";
+        }
+
+        internal static string SanitizeForPrompt(string summary)
+        {
+            if (string.IsNullOrWhiteSpace(summary)) return string.Empty;
+            string clean = summary.Trim();
+            Match match = GeneratedOutingLocation.Match(clean);
+            if (!match.Success || IsDurableGameplayLocation(match.Groups[2].Value)) return clean;
+            // Preserve duration and any independently observed result; omit only the invalid
+            // pseudo-location clause. This deliberately does not infer the prior or next zone.
+            return match.Groups[1].Value.Trim() + "." + match.Groups[3].Value;
         }
     }
 }

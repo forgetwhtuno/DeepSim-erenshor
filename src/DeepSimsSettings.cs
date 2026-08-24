@@ -230,7 +230,7 @@ namespace ErenshorDeepSims
         public string SocialPerspective = "MMO";
 
         [Config("ActivityPreset", "Social Director", "Autonomous social activity: Adaptive chooses a temporary Quiet/Normal/Lively party mood from personality and verified context; Quiet, Normal, and Lively are manual overrides.")]
-        public string SocialActivityPreset = "Adaptive";
+        public string SocialActivityPreset = "Lively";
 
         [Config("AdaptiveTownZones", "Social Director", "Comma-separated verified scene names that receive a social town boost in Adaptive activity mode.")]
         public string AdaptiveTownZones = "Port Azure";

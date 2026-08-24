@@ -14,6 +14,8 @@ namespace ErenshorDeepSims
             TestExpeditionAndCamp(results);
             TestRelax(results);
             TestPromptRobustness(results);
+            TestMemorySalience(results);
+            TestReflectionProvenance(results);
             TestNewsProvenanceAndOpinionGuards(results);
             TestVoiceQuality(results);
             return results;
@@ -173,6 +175,29 @@ namespace ErenshorDeepSims
                 KnowledgeQueryClassifier.ShouldLookup(kraken) &&
                 string.Equals(KnowledgeQueryClassifier.ExtractSearchQuery(kraken, "Vitheo"), "Krakengard", StringComparison.OrdinalIgnoreCase);
             Add(results, "external/Krakengard stays on game-knowledge route", gameRoute);
+
+            List<ExternalNewsItem> raw = new List<ExternalNewsItem>
+            {
+                new ExternalNewsItem { Headline = "NASA delays Artemis launch", Publisher = "Reuters", Url = "https://example.com/nasa" },
+                new ExternalNewsItem { Headline = "Local football club names new coach", Publisher = "AP", Url = "https://example.com/sport" }
+            };
+            List<ExternalNewsItem> relevant = ExternalNewsRelevance.Filter("NASA today", raw);
+            Add(results, "external/raw irrelevant results do not become usable evidence", relevant.Count == 1 && relevant[0].Headline.IndexOf("NASA", StringComparison.Ordinal) >= 0);
+            Add(results, "external/arbitrary current-events subject uses same relevance path",
+                ExternalNewsRelevance.Filter("OpenAI today", new List<ExternalNewsItem> { new ExternalNewsItem { Headline = "OpenAI announces research update", Url = "https://example.com/openai" } }).Count == 1);
+
+            WikiResult evidence = new WikiResult { Found = true, SourceLabel = "external real-world news search", Title = "NASA delays Artemis launch", Extract = "[Reuters - 1h ago] NASA delays Artemis launch" };
+            SimMemory memory = new SimMemory(); memory.Normalize();
+            string reason;
+            Add(results, "external/retrieved evidence admits consistent answer",
+                GroundingGuard.IsKnowledgeModeGrounded("NASA delayed the Artemis launch.", memory, new WorldSnapshot(), evidence, out reason));
+            Add(results, "external/no-news contradiction is rejected for retry",
+                !GroundingGuard.IsKnowledgeModeGrounded("No new NASA news today.", memory, new WorldSnapshot(), evidence, out reason) && reason == "contradicted retrieved evidence");
+            Add(results, "external/second contradiction has deterministic evidence fallback",
+                GroundingGuard.ExternalNewsEvidenceFallback(evidence).IndexOf("NASA delays Artemis launch", StringComparison.Ordinal) >= 0);
+            WikiResult miss = new WikiResult { Found = false, SourceLabel = "external real-world news search", Extract = string.Empty };
+            Add(results, "external/zero relevant evidence permits bounded no-result response",
+                GroundingGuard.IsKnowledgeModeGrounded("couldn't find anything relevant right now", memory, new WorldSnapshot(), miss, out reason));
         }
 
         private static void NewsCase(List<string> results, string name, string message, bool expectedLookup, string expectedQuery)
@@ -308,6 +333,68 @@ namespace ErenshorDeepSims
             string system = prompt == null || prompt.Count == 0 || prompt[0] == null ? string.Empty : prompt[0].content;
             Add(results, "prompt/no catchy forbidden random-class example", system.IndexOf("random druid", StringComparison.OrdinalIgnoreCase) < 0);
             Add(results, "prompt/verified self-class instruction present", system.IndexOf("verified class", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static void TestMemorySalience(List<string> results)
+        {
+            SimSnapshot sim = new SimSnapshot { Name = "Fiora", ClassName = "Stormcaller", Level = 19 };
+            WorldSnapshot world = new WorldSnapshot { Scene = "Hidden", Party = new List<SimSnapshot> { sim } };
+            SimMemory memory = new SimMemory(); memory.Normalize(); memory.Name = sim.Name;
+            string legacy = "The player defeated the off-map PvP party led by Rook in Hidden.";
+            memory.ImportantMemories.Add(legacy);
+            SocialIntent unrelated = new SocialIntent("seed", "memory:level", 1, 1,
+                "briefly mention the selected moment", "The player just reached level 19.", sim.Name);
+            List<ChatMessage> unrelatedPrompt = PromptBuilder.BuildAutonomous(sim, memory, world,
+                "CURRENT SUMMARY: Rook was mentioned earlier.", null, null, false, unrelated);
+            string unrelatedText = unrelatedPrompt == null || unrelatedPrompt.Count == 0 || unrelatedPrompt[0] == null
+                ? string.Empty : unrelatedPrompt[0].content;
+            Add(results, "memory/unrelated legacy important remains stored and seed-eligible",
+                memory.ImportantMemories.Contains(legacy) && AmbientSeedProducers.BuildSharedMemoryCandidates(sim, memory, 4, DateTime.UtcNow, string.Empty).Count > 0);
+            Add(results, "memory/unrelated autonomous seed omits legacy named actor",
+                unrelatedText.IndexOf("Rook", StringComparison.OrdinalIgnoreCase) < 0);
+
+            SocialIntent selected = new SocialIntent("seed", "memory:rook", 1, 1,
+                "briefly mention the selected moment", legacy, sim.Name);
+            string selectedText = JoinPrompt(PromptBuilder.BuildAutonomous(sim, memory, world,
+                "CURRENT SUMMARY: quiet downtime.", null, null, false, selected));
+            Add(results, "memory/selected legacy seed remains available in prompt", selectedText.IndexOf("Rook", StringComparison.OrdinalIgnoreCase) >= 0);
+            string threadText = JoinPrompt(PromptBuilder.BuildPartyThreadReply(sim, memory, world,
+                new List<ConversationLine> { new ConversationLine("Player", "what happened with Rook?") }, 2, null));
+            Add(results, "memory/thread-relevant legacy memory remains available", threadText.IndexOf("Rook", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static void TestReflectionProvenance(List<string> results)
+        {
+            DateTime now = DateTime.UtcNow;
+            List<SessionSocialEvent> simOnly = new List<SessionSocialEvent>
+            {
+                new SessionSocialEvent { Provenance = SessionEventProvenance.SimSaid, Text = "Are you still mad at Scrubby?" }
+            };
+            Add(results, "reflection/sim question cannot become player Scrubby belief",
+                !ReflectionProvenanceGuard.Allows("Player confirmed no longer holding a grudge against Scrubby.", simOnly));
+            Add(results, "reflection/sim question cannot create player rain preference",
+                !ReflectionProvenanceGuard.Allows("Player likes rain.", new List<SessionSocialEvent> { new SessionSocialEvent { Provenance = SessionEventProvenance.SimSaid, Text = "You love rain, don't you?" } }));
+            List<SessionSocialEvent> playerRain = new List<SessionSocialEvent>
+            {
+                new SessionSocialEvent { Provenance = SessionEventProvenance.PlayerSaid, Text = "I love the rain in this game" }
+            };
+            Add(results, "reflection/player rain statement permits attributed summary",
+                ReflectionProvenanceGuard.Allows("Player likes rain in this game.", playerRain));
+            List<SessionSocialEvent> playerScrubby = new List<SessionSocialEvent>
+            {
+                new SessionSocialEvent { Provenance = SessionEventProvenance.PlayerSaid, Text = "No, I'm not mad at Scrubby anymore." }
+            };
+            Add(results, "reflection/player Scrubby answer permits summary",
+                ReflectionProvenanceGuard.Allows("Player confirmed no longer holding a grudge against Scrubby.", playerScrubby));
+            Add(results, "reflection/verified event remains factual without player attribution",
+                ReflectionProvenanceGuard.Allows("The party completed the verified PvP event.", simOnly));
+        }
+
+        private static string JoinPrompt(List<ChatMessage> prompt)
+        {
+            string text = string.Empty;
+            for (int i = 0; prompt != null && i < prompt.Count; i++) if (prompt[i] != null) text += "\n" + prompt[i].content;
+            return text;
         }
 
         private static void Add(List<string> results, string name, bool pass)

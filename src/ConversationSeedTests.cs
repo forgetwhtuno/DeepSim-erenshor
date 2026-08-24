@@ -35,6 +35,12 @@ namespace ErenshorDeepSims
             Add(results, "quiet preset raises the effective silence threshold", QuietPresetRaisesSilence);
             Add(results, "pending verified event owns the social moment", PendingEventOwnsMoment);
             Add(results, "shared memory seed is restricted to its owning Sim", SharedMemoryScopedToOwner);
+            Add(results, "pinned shared memory requires relevance and respects KnownBy", PinnedSharedMemoryRequiresRelevanceAndKnowledge);
+            Add(results, "exact same pinned memory accrues fatigue", PinnedMemoryAccruesFatigue);
+            Add(results, "identity seed is relevance-gated and perspective-aware", IdentitySeedIsRelevantAndPerspectiveAware);
+            Add(results, "recent verified competitive event beats generic idle", RecentCompetitiveEventBeatsIdle);
+            Add(results, "PvP and Nemesis terminal copies correlate to one episode", CompetitiveTerminalCorrelationCollapsesDuplicate);
+            Add(results, "seed diagnostics expose bounded labels without raw private memory", SeedDiagnosticsArePrivacySafe);
             Add(results, "player topic classifier maps known phrases and refuses guesses", PlayerTopicClassifierIsConservative);
             Add(results, "player topic scope is fixed to who was present when said", PlayerTopicScopeFixedAtRecordTime);
             Add(results, "player topic expires and never carries a verified-fact bonus", PlayerTopicExpiresAndUnverified);
@@ -47,6 +53,8 @@ namespace ErenshorDeepSims
             Add(results, "seed requiring another Sim is rejected before generation", OtherSimSeedRequiresAnotherVisibleSim);
             Add(results, "post-generation rejection applies bounded temporary penalty", RejectionPenaltyIsBoundedAndTemporary);
             Add(results, "rejection penalty is scoped to topic and speaker", RejectionPenaltyIsScoped);
+            Add(results, "Lively contextual preference can break a close generic tie", ContextualPreferenceBreaksCloseTie);
+            Add(results, "each free-social shape remains selectable", FreeSocialShapesRemainSelectable);
 
             return results;
         }
@@ -628,6 +636,148 @@ namespace ErenshorDeepSims
             return null;
         }
 
+        private static string PinnedSharedMemoryRequiresRelevanceAndKnowledge()
+        {
+            SimSnapshot fiora = new SimSnapshot { Key = "fiora", Name = "Fiora" };
+            SimMemory memory = new SimMemory();
+            memory.Normalize();
+            memory.Name = "Fiora";
+            memory.SimKey = "fiora";
+            StructuredMemoryRecord pinned = IdentitySchema.Create("authored_pinned",
+                "Fiora and Phanty renewed an old temple order vow at sunrise.", 100, true, true,
+                fiora.Key, fiora.Name, "test-pinned");
+            pinned.Id = "shared-temple-vow";
+            pinned.KnownBy = new List<string> { "player", "fiora", "Fiora", "phanty", "Phanty" };
+            pinned.Participants = new List<string> { "player", "fiora", "Fiora", "phanty", "Phanty" };
+            memory.AuthoredIdentity.PinnedMemories.Add(pinned);
+
+            List<AmbientSeedCandidate> relevant = AmbientSeedProducers.BuildSharedMemoryCandidates(
+                fiora, memory, 900, T0, "We are standing by the temple and talking about the order vow.");
+            AmbientSeedCandidate found = null;
+            for (int i = 0; i < relevant.Count; i++)
+                if (relevant[i].TopicKey.IndexOf("memory:pinned:", StringComparison.Ordinal) == 0) { found = relevant[i]; break; }
+            if (found == null) return "relevant pinned memory was not offered";
+            if (!found.IsEligibleSpeaker("Fiora") || !found.IsEligibleSpeaker("Phanty")) return "KnownBy participants were not eligible";
+            if (found.IsEligibleSpeaker("Dancer")) return "uninformed Sim gained eligibility";
+
+            List<AmbientSeedCandidate> irrelevant = AmbientSeedProducers.BuildSharedMemoryCandidates(
+                fiora, memory, 901, T0, "auction prices and weapon repairs");
+            for (int i = 0; i < irrelevant.Count; i++)
+                if (irrelevant[i].TopicKey.IndexOf("memory:pinned:", StringComparison.Ordinal) == 0)
+                    return "pinned memory was injected without relevance";
+            return null;
+        }
+
+        private static string PinnedMemoryAccruesFatigue()
+        {
+            SimSnapshot fiora = new SimSnapshot { Key = "fiora", Name = "Fiora" };
+            SimMemory memory = new SimMemory(); memory.Normalize(); memory.Name = "Fiora"; memory.SimKey = "fiora";
+            StructuredMemoryRecord pinned = IdentitySchema.Create("authored_pinned",
+                "The old temple bell marked the promise.", 100, true, true, fiora.Key, fiora.Name, "test");
+            pinned.Id = "same-pinned-memory";
+            memory.AuthoredIdentity.PinnedMemories.Add(pinned);
+            List<AmbientSeedCandidate> first = AmbientSeedProducers.BuildSharedMemoryCandidates(fiora, memory, 902, T0, "temple bell promise");
+            List<AmbientSeedCandidate> second = AmbientSeedProducers.BuildSharedMemoryCandidates(fiora, memory, 903, T0.AddSeconds(10), "temple bell promise");
+            AmbientSeedCandidate a = null, b = null;
+            for (int i = 0; i < first.Count; i++) if (first[i].TopicKey.IndexOf("memory:pinned:", StringComparison.Ordinal) == 0) a = first[i];
+            for (int i = 0; i < second.Count; i++) if (second[i].TopicKey.IndexOf("memory:pinned:", StringComparison.Ordinal) == 0) b = second[i];
+            if (a == null || b == null || a.TopicKey != b.TopicKey) return "same pinned record did not keep one fatigue key";
+            TopicFatigueTracker fatigue = new TopicFatigueTracker();
+            fatigue.NoteUsed(a.TopicKey, a.CooldownGroup, "Fiora", 0, T0);
+            string detail;
+            double penalty = fatigue.Penalty(b.TopicKey, b.CooldownGroup, "Fiora", 0, T0.AddSeconds(10), out detail);
+            return penalty > 0.0 ? null : "same pinned memory received no repeat penalty";
+        }
+
+        private static string IdentitySeedIsRelevantAndPerspectiveAware()
+        {
+            SimSnapshot cyndara = new SimSnapshot { Key = "cyndara", Name = "Cyndara", ClassName = "Arcanist" };
+            SimMemory memory = new SimMemory(); memory.Normalize(); memory.Name = "Cyndara"; memory.SimKey = "cyndara";
+            memory.AuthoredIdentity.ErenshorPersona = "a junior scholar from the mage academy who studies spellcraft";
+            memory.AuthoredIdentity.PersonalBackground = "a college student considering a job after graduation";
+
+            List<AmbientSeedCandidate> rpRelevant = AmbientSeedProducers.BuildIdentityCandidates(cyndara, memory,
+                "We are discussing spellcraft and the mage academy.", true, T0);
+            bool persona = false, background = false;
+            for (int i = 0; i < rpRelevant.Count; i++)
+            {
+                persona |= rpRelevant[i].TopicKey.IndexOf("identity:persona:", StringComparison.Ordinal) == 0;
+                background |= rpRelevant[i].TopicKey.IndexOf("identity:background:", StringComparison.Ordinal) == 0;
+            }
+            if (!persona) return "relevant Erenshor persona did not become a seed";
+            if (background) return "modern personal background leaked into Roleplay seed candidates";
+
+            List<AmbientSeedCandidate> rpIrrelevant = AmbientSeedProducers.BuildIdentityCandidates(cyndara, memory,
+                "The bridge looks narrow.", true, T0);
+            if (rpIrrelevant.Count != 0) return "irrelevant biography was offered as ambient subject";
+
+            List<AmbientSeedCandidate> mmoRelevant = AmbientSeedProducers.BuildIdentityCandidates(cyndara, memory,
+                "Have you thought about a job after graduation?", false, T0);
+            for (int i = 0; i < mmoRelevant.Count; i++)
+                if (mmoRelevant[i].TopicKey.IndexOf("identity:background:", StringComparison.Ordinal) == 0) return null;
+            return "relevant personal background was unavailable in MMO perspective";
+        }
+
+        private static string RecentCompetitiveEventBeatsIdle()
+        {
+            SimSnapshot fiora = new SimSnapshot { Key = "fiora", Name = "Fiora", ClassName = "Windblade" };
+            SimMemory memory = new SimMemory(); memory.Normalize(); memory.Name = "Fiora"; memory.SimKey = "fiora";
+            memory.RecentEvents.Add(new MemoryEvent
+            {
+                utc = T0.AddMinutes(-5).ToString("o"), type = "pvp_match_completed",
+                text = "Verified PvP match completed between the player and Fiora in Port Azure.", importance = 85
+            });
+            List<AmbientSeedCandidate> candidates = new List<AmbientSeedCandidate> { new AmbientSeedCandidate(AmbientTopics.Idle, T0) };
+            candidates.AddRange(AmbientSeedProducers.BuildSharedMemoryCandidates(fiora, memory, 904, T0, "Port Azure"));
+            AmbientSeedDecision decision = Select(904, SocialContextMode.Normal, candidates,
+                new List<SimSnapshot> { fiora }, new TopicFatigueTracker(), 0, T0, 0.6, 0.0, false);
+            if (decision.SilenceWon) return "verified competitive event lost to silence";
+            if (decision.SelectedTopicKey.IndexOf("competitive:", StringComparison.Ordinal) != 0)
+                return "selected " + decision.SelectedTopicKey + " instead of competitive event";
+            return decision.SelectedSource.IndexOf("competitive", StringComparison.OrdinalIgnoreCase) >= 0 ? null : "competitive source label missing";
+        }
+
+        private static string CompetitiveTerminalCorrelationCollapsesDuplicate()
+        {
+            CompetitiveEventCorrelation.ResetForTests();
+            string firstKey, duplicateKey, rematchKey;
+            if (!CompetitiveEventCorrelation.TryAcceptTerminal("pvp", "match-42", "Fiora", "Port Azure", T0, out firstKey))
+                return "first authoritative terminal event was rejected";
+            if (CompetitiveEventCorrelation.TryAcceptTerminal("nemesis", "match-42", "Fiora", "Port Azure", T0.AddSeconds(2), out duplicateKey))
+                return "cross-source duplicate terminal event was accepted";
+            if (!CompetitiveEventCorrelation.TryAcceptTerminal("nemesis", "match-43", "Fiora", "Port Azure", T0.AddSeconds(45), out rematchKey))
+                return "distinct later rematch was collapsed";
+            if (string.IsNullOrWhiteSpace(firstKey) || string.IsNullOrWhiteSpace(duplicateKey)) return "correlation key was not produced";
+            CompetitiveEventCorrelation.ResetForTests();
+            return null;
+        }
+
+        private static string SeedDiagnosticsArePrivacySafe()
+        {
+            SimSnapshot fiora = new SimSnapshot { Key = "fiora", Name = "Fiora" };
+            SimMemory memory = new SimMemory(); memory.Normalize(); memory.Name = "Fiora"; memory.SimKey = "fiora";
+            const string secret = "private moonstone promise alpha";
+            StructuredMemoryRecord pinned = IdentitySchema.Create("authored_pinned", secret, 100, true, true,
+                fiora.Key, fiora.Name, "private-test");
+            pinned.Id = "private-memory-1";
+            memory.AuthoredIdentity.PinnedMemories.Add(pinned);
+            List<AmbientSeedCandidate> candidates = AmbientSeedProducers.BuildSharedMemoryCandidates(fiora, memory, 905, T0, "moonstone promise");
+            AmbientSeedDecision decision = Select(905, SocialContextMode.Camp, candidates,
+                new List<SimSnapshot> { fiora }, new TopicFatigueTracker(), 0, T0, 1.0, 0.0, true);
+            string diag = AmbientSeedDiagnostics.Format(decision);
+            if (diag.IndexOf(secret, StringComparison.OrdinalIgnoreCase) >= 0) return "raw private memory appeared in diagnostics";
+            if (diag.IndexOf("opportunity=ambient", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("mode/context=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("source=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("speaker=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("score=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("exclusion=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("silenceScore=", StringComparison.Ordinal) < 0 ||
+                diag.IndexOf("selected=", StringComparison.Ordinal) < 0)
+                return "bounded seed diagnostic fields are incomplete";
+            return null;
+        }
+
         private static string PlayerTopicClassifierIsConservative()
         {
             if (PlayerTopicClassifier.Classify("did anyone see what dropped from that pack?") != PlayerTopicClassifier.Loot)
@@ -636,6 +786,14 @@ namespace ErenshorDeepSims
                 return "zone phrasing was not classified";
             if (PlayerTopicClassifier.Classify("anyone up for a duel later?") != PlayerTopicClassifier.Duel)
                 return "duel phrasing was not classified";
+            if (PlayerTopicClassifier.Classify("Cyndara, did you study those spells at the mage academy?") != PlayerTopicClassifier.StudyMagic)
+                return "spell-study phrasing was not classified";
+            if (PlayerTopicClassifier.Classify("does your holy order visit this temple?") != PlayerTopicClassifier.FaithOrder)
+                return "faith/order phrasing was not classified";
+            if (PlayerTopicClassifier.Classify("what kind of job do you want after graduation?") != PlayerTopicClassifier.WorkLife)
+                return "work-life phrasing was not classified";
+            if (PlayerTopicClassifier.Classify("does this lever work?") != null)
+                return "generic use of work was over-classified as real-life work";
             if (PlayerTopicClassifier.Classify("lol nice one") != null)
                 return "unrelated chatter was classified as a topic";
             if (PlayerTopicClassifier.Classify(string.Empty) != null)
@@ -655,6 +813,9 @@ namespace ErenshorDeepSims
             if (!candidates[0].IsEligibleSpeaker("Fiora")) return "a present Sim lost eligibility";
             if (candidates[0].IsEligibleSpeaker("Dancer")) return "a Sim who joined afterward gained eligibility";
             if (candidates[0].HasFact) return "an unverified player line was carried as a verified Fact";
+            string relevance = tracker.BuildRelevanceContext(T0.AddSeconds(5.0));
+            if (relevance.IndexOf("dropped", StringComparison.OrdinalIgnoreCase) < 0)
+                return "recent heard topic was unavailable as bounded relevance context";
             return null;
         }
 
@@ -762,6 +923,44 @@ namespace ErenshorDeepSims
                 "react to the verified completed practice duel without inventing a winner or a wager",
                 28.0, "Verified friendly duel completed between Fiora and the player.",
                 "verified duel telemetry", 80, 0.0, T0, T0.AddSeconds(600.0), null);
+        }
+
+        private static string ContextualPreferenceBreaksCloseTie()
+        {
+            List<SimSnapshot> speakers = Party();
+            for (long id = 8000; id < 8100; id++)
+            {
+                List<AmbientSeedCandidate> candidates = new List<AmbientSeedCandidate>
+                {
+                    new AmbientSeedCandidate("ordinary_downtime", "smalltalk", "generic fallback", 33.0, string.Empty, string.Empty, 0, 0.0, T0, DateTime.MaxValue, null),
+                    new AmbientSeedCandidate("free_social_hypothetical", "smalltalk", "safe hypothetical", 32.0, string.Empty, string.Empty, 0, 0.0, T0, DateTime.MaxValue, null)
+                };
+                AmbientSeedDecision ordinary = AmbientSeedSelector.Select(id, SocialContextMode.Camp, candidates, speakers,
+                    new TopicFatigueTracker(), 0, T0, AmbientSeedSelector.DefaultSilenceNormal, AmbientSeedSelector.DefaultSilenceCamp,
+                    AmbientSeedSelector.DefaultSilenceRelax, 0.0, 0.0, false, true, null, 0.0);
+                AmbientSeedDecision lively = AmbientSeedSelector.Select(id, SocialContextMode.Camp, candidates, speakers,
+                    new TopicFatigueTracker(), 0, T0, AmbientSeedSelector.DefaultSilenceNormal, AmbientSeedSelector.DefaultSilenceCamp,
+                    AmbientSeedSelector.DefaultSilenceRelax, 0.0, 0.0, false, true, null, 1.0);
+                if (ordinary.SelectedTopicKey == "ordinary_downtime" && lively.SelectedTopicKey == "free_social_hypothetical") return null;
+            }
+            return "contextual nudge never changed a close generic-vs-free-social result";
+        }
+
+        private static string FreeSocialShapesRemainSelectable()
+        {
+            string[] shapes = { "free_social_question", "free_social_hypothetical", "free_social_impulse" };
+            for (int i = 0; i < shapes.Length; i++)
+            {
+                List<AmbientSeedCandidate> one = new List<AmbientSeedCandidate>
+                {
+                    new AmbientSeedCandidate(shapes[i], "smalltalk", "fact-free social shape", 31.0, string.Empty, string.Empty, 0, 0.0, T0, DateTime.MaxValue, null)
+                };
+                AmbientSeedDecision decision = AmbientSeedSelector.Select(8200 + i, SocialContextMode.Camp, one, Party(),
+                    new TopicFatigueTracker(), 0, T0, AmbientSeedSelector.DefaultSilenceNormal, AmbientSeedSelector.DefaultSilenceCamp,
+                    AmbientSeedSelector.DefaultSilenceRelax, 0.0, 0.0, true, true, null, 1.0);
+                if (decision.SilenceWon || decision.SelectedTopicKey != shapes[i]) return shapes[i] + " did not remain selectable";
+            }
+            return null;
         }
 
         private static List<SimSnapshot> Party()

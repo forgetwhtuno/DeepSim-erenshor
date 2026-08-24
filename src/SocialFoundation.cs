@@ -173,8 +173,11 @@ namespace ErenshorDeepSims
                 m.IndexOf("better than", StringComparison.Ordinal) >= 0 || m.IndexOf("prefer", StringComparison.Ordinal) >= 0 ||
                 m.IndexOf("more chill", StringComparison.Ordinal) >= 0)
                 return PartyReplyIntent.Preference;
-            if (m.IndexOf("last time", StringComparison.Ordinal) >= 0 || m.IndexOf("remember", StringComparison.Ordinal) >= 0)
+            if (m.IndexOf("last time", StringComparison.Ordinal) >= 0 || m.IndexOf("remember", StringComparison.Ordinal) >= 0 ||
+                Regex.IsMatch(m, @"\b(?:did we|were we|how did we meet|how do you know me|our past|shared history)\b", RegexOptions.IgnoreCase))
                 return PartyReplyIntent.VerifiedHistoryQuestion;
+            if (Regex.IsMatch(m, @"\b(?:irl|your background|your past|who are you|tell me about yourself|where are you from|what do you do|what are you like|what did you do before this|what did you study|what do you study|where did you grow up|what do you do for work|what(?:'s| is) your job|your career|your order|your academy|your persona|how was work|how are things in real life|what are you doing this weekend|why are you online so late|what games do you like|are you in school|what do you do outside erenshor)\b", RegexOptions.IgnoreCase))
+                return PartyReplyIntent.IdentityFact;
             // Subjective-opinion phrasing must win over the generic factual-lookup check below. A
             // question like "what do you think about being a windblade?" mentions a class name (which
             // trips KnowledgeQueryClassifier.ShouldLookup's class+question-word heuristic) but is asking

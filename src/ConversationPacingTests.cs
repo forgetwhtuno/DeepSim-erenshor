@@ -150,6 +150,18 @@ namespace ErenshorDeepSims
                 Add(results, "TEST12/Quiet expected interval is longer than Normal", quietLonger);
             }
 
+            {
+                double oneMin, oneMax, twoMin, twoMax, fiveMin, fiveMax;
+                AmbientCadence.LivelyPartyRange(1, out oneMin, out oneMax);
+                AmbientCadence.LivelyPartyRange(2, out twoMin, out twoMax);
+                AmbientCadence.LivelyPartyRange(5, out fiveMin, out fiveMax);
+                Add(results, "Lively one-Sim cadence is longest", oneMin == 180.0 && oneMax == 360.0 && oneMin > twoMin);
+                Add(results, "Lively two-Sim cadence is moderate", twoMin == 120.0 && twoMax == 240.0);
+                Add(results, "Lively full-party cadence is substantially faster", fiveMin == 60.0 && fiveMax == 150.0 && fiveMax < oneMax);
+                Add(results, "party scaling remains one bounded jittered timer", AmbientCadence.NextDelaySeconds(SocialActivityPreset.Lively, 5, new Random(7)) >= fiveMin && AmbientCadence.NextDelaySeconds(SocialActivityPreset.Lively, 5, new Random(8)) <= fiveMax);
+                Add(results, "thread follow-up delay is bounded 8-30 seconds", AmbientCadence.ThreadFollowUpSeconds(0.0) == 8.0 && AmbientCadence.ThreadFollowUpSeconds(1.0) == 30.0);
+            }
+
             // TEST 13: second-thread-reply probability > third/fourth-reply probability when hooks are
             // equal (momentum decay).
             {

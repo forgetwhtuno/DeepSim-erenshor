@@ -1,12 +1,27 @@
-# Deep Sims for Erenshor 0.7.4 — grounded social UX development candidate
+# Deep Sims for Erenshor 0.8.2 Beta
 
 Deep Sims makes Erenshor's existing SimPlayers feel more like persistent MMO companions. It observes verified game state, keeps bounded sidecar memory, and produces short social dialogue through deterministic templates or an optional local Ollama model.
 
+With Campmaster 0.4.0 present, Campmaster owns a deterministic activity classification (`Combat`, `Travel`, `ActiveGameplay`, `SocialDowntime`, `ExtendedDowntime`) sampled from current readiness, party, combat, optional competitive lifecycle, native pull activity, scene, and player displacement. Sustained safe stationary party downtime can become automatic Relax social context after about 60 seconds. Deep Sims then runs bounded low-priority context assessments—30–60 seconds for a 4–5 Sim Lively party and much less often for one companion—which may either open one normal bounded thread or deliberately keep quiet.
+
+Recent supported visible party/Say/Shout/Guild/whisper context is held only in a 20-line in-memory buffer. Public chat remains attributed `HEARD` context, never verified world fact, never a public reply target, and never durable memory. The existing compact session summary is likewise ephemeral and cannot promote itself into factual history.
+
 **Deep Sims does not replace Erenshor's Sim AI and does not control gameplay.** Erenshor remains authoritative for movement, combat, pulls, healing, targeting, loot, grouping, roles, equipment, quests, faction, progression, and saves.
 
-> This branch is being prepared as a native Lunaris build. Treat 0.7.4 as a development/migration candidate until the compile and in-game conversation checklist is completed on a current Erenshor installation.
+> This is a public beta candidate. Deep Sims never controls Erenshor gameplay, and its LLM-backed dialogue requires a local Ollama-compatible runtime and model.
 
 Part of the **Forgotten Roads for Erenshor** mod collection.
+
+## What's new in 0.8.2 Beta
+
+- On return after a bounded offline interval, native Friends can receive modest simulated Recent Life (availability, brief exploration/gathering/crafting/solo play, and occasional participant-only overlap). It is clearly provenance-tagged sidecar roleplay, retained for seven days, and never changes native levels, loot, gear, gold, quests, or the Friend roster. Party Tools v2 is optional; without it catch-up fails closed.
+- During MMO-perspective social downtime, a two-or-more-Sim party may very occasionally discuss one actually retrieved outside-world headline. Direct conversation and current threads win, Roleplay disables the lane, all replies reuse the same evidence, and headline chat remains ephemeral rather than permanent memory.
+- Practice Duel contract-v4 completion facts carry RequestId/DuelId correlation into one character-scoped social episode; only positively proven loaded same-scene Deep Sims witness local Duel events, while verified participants are explicitly KnownBy.
+- MMO perspective now has a persistent fictional simulated-player background separate from verified Erenshor facts and the in-world roleplay persona. Authored background overrides the generated default; Roleplay mode keeps this layer hidden.
+- The Identity Editor is a retained-uGUI scroll form with resolution-independent anchors, field-local labels/reset controls, and Generated/Authored/Unknown provenance.
+- Campmaster schema 3 / SocialContract v1 living events can become factual episodes and seeds; living-event zone attribution requires matching Camp session identity.
+- Repeated same-speaker chat evidence is canonicalized for prompt/memory use while retaining recurrence metadata.
+- Player replies receive scheduling priority over low-value curation/reflection/autonomous work, and low-value autonomous grounding gets no expensive semantic retry. `/dsperf` exposes bounded queue/retry/social metrics.
 
 ## What's new in 0.7.4
 
@@ -15,11 +30,50 @@ Part of the **Forgotten Roads for Erenshor** mod collection.
 - `/dsbanter` now creates a bounded connected A+B conversation thread through the existing Social Director.
 - Autonomous semantic seeds temporarily remember verifier rejection, reducing repeated unsupported prompts without turning rejected text into world knowledge.
 
+## Identity and retained Identity Editor
+
+Fresh Sims no longer present an empty authored-identity schema. Deep Sims now generates a **deterministic, non-factual default profile** from the Sim's stable identity, current native class, level tone, and verified current-character Friend state when that state is actually available. The six current class templates are Arcanist, Druid, Paladin, Reaver, Stormcaller, and Windblade; unknown/future classes fall back to the universal adventurer scaffold.
+
+The layers remain deliberately separate:
+
+1. **Verified native facts** — current class, level, zone, guild, current-character Friend state, party/role context.
+2. **Default template** — generated roleplay tendencies only; never evidence of birthplace, family, named training, religion/order, accomplishments, or past events.
+3. **My Override** — explicit player-authored personality, personal background, Erenshor persona, and relationship canon.
+4. **Pinned/authored + shared history** — explicit facts the player chooses to establish, with shared KnownBy limited to selected current Sims.
+5. **Learned structured memory** — gameplay/conversation-derived records owned by the existing validation pipeline.
+
+Open the existing Deep Sims retained panel and choose **Identity Editor**. There is no new global hotkey. The editor uses retained Unity uGUI and provides:
+
+- a Sim selector plus verified current context and the generated Default Profile;
+- six multiline authored fields—personality, simulated-player background, Erenshor persona, relationship, long-term wants, and cares—each with explicit generated/authored provenance;
+- Save, per-field reset, Reset All Authored Identity, and Reload/Cancel;
+- separate `PINNED / AUTHORED`, `SHARED HISTORY`, and `LEARNED MEMORY` sections;
+- add/edit/remove for authored memory, participant-selective shared history, and Forget / Copy → Pinned for learned memory;
+- explicit local biography Export/Import using a versioned JSON schema under Deep Sims' own local export directory.
+
+Empty authored fields mean **use the default**; generated defaults are never copied into authored fields merely because the editor was opened or saved. Editing a learned memory in place is intentionally unsupported—copy it into authored pinned memory first if you want to rewrite it.
+
+Power-user commands remain available:
+
+```text
+/dsidentity <Sim> show
+/dsidentity <Sim> editor
+/dsidentity <Sim> set personality|background|persona|relationship <text>
+/dsidentity <Sim> add history|pinned <text>
+/dsidentity <Sim> share <OtherSim> <shared-history text>
+/dsidentity <Sim> clear|reset personality|background|persona|relationship
+/dsidentity <Sim> reset all
+/dsidentity <Sim> export
+/dsidentity <Sim> import
+```
+
+Default identity is prompt flavor below live native facts, authored canon, and verified learned history. Background is admitted only when the current question makes it relevant; a dungeon-readiness question does not randomly pull in an unrelated college/job/family-style authored background.
+
 ## Requirements
 
 - Erenshor
 - [Lunaris](https://github.com/MizukiBelhi/Lunaris)
-- Ollama only if you want LLM-backed dialogue. `Templates` and `Off` do not require inference.
+- A local Ollama-compatible runtime and available model for LLM-backed dialogue. The default model is `qwen3.5:4b`; deterministic `Templates` mode remains available for troubleshooting or inference-free fallback.
 
 Deep Sims no longer requires BepInEx as its native plugin loader. Harmony is still used intentionally for verified Erenshor hooks and the existing rich command parser.
 
@@ -186,6 +240,8 @@ COOP is optional. When detected, Deep Sims preserves its conservative host-autho
 
 Deep Sims remains standalone. Current optional integrations include Campmaster, Practice Duels, PvP, Nemesis, and related suite components. Existing narrow runtime/reflection contracts remain optional and absent-safe during this migration; they are not being forced to Aura until both sides have stable native contracts.
 
+None of those companion mods—and neither Forgotten Roads Suite Hub nor Erenshor COOP—is required to use Deep Sims.
+
 `BUILD_AND_INSTALL.ps1` does **not** build sibling mods unless `-BuildCompanionMods` is explicitly supplied.
 
 ## Optional Suite Hub integration
@@ -203,6 +259,7 @@ The pending-Ollama unload/re-enable sequence remains a **live validation require
 - External real-world news is conversation-scoped and never becomes Erenshor lore or permanent Sim memory.
 - API keys are never intentionally logged or exported.
 - Deep Sims memory remains local sidecar data.
+- Exact prompt capture is a developer diagnostic, defaults off, and may contain real conversation text. Never enable or distribute it as a public release default.
 - Do not publish personal memory exports or private logs with bug reports unless you have reviewed them.
 
 ## Hot reload / development safety
@@ -243,8 +300,12 @@ If Deep Sims does not appear:
 - check the Lunaris console/log for an assembly or Harmony error;
 - rebuild against the current `Assembly-CSharp.dll` after an Erenshor update;
 - use `/aistatus`, `/dsperf`, `/dsguardtest`, and `/dsinspect` when available.
+- if Ollama is unavailable, start Ollama, confirm the configured model exists, or use `Templates` mode to verify the social layer independently from model inference;
+- if the model is unavailable, run `ollama pull qwen3.5:4b` or select an already-installed compatible model with `/aimodel <model>`;
+- if replies are slow, use `/dsperf`, try a smaller model, or compare `/dsinference cpu` and `/dsinference gpu` without treating temporal hitch overlap as proof of causation;
+- reset authored identity through the Identity Editor or `/dsidentity <Sim> reset all`; use `/dsforget` only for eligible learned/flavor memory and review `/dsmemory <Sim>` first.
 
-- if Ollama is unavailable, use `Templates` mode to verify the social layer independently from model inference.
+See `INSTALL.md` for the short installation and clean-start checklist.
 
 ## Related mods
 

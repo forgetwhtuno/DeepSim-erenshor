@@ -9,6 +9,62 @@ namespace ErenshorDeepSims
     internal enum KnowledgeNeed { None, GameWiki, ExternalNews, BothAmbiguous }
     internal enum SessionEventProvenance { VerifiedWorld, PlayerSaid, SimSaid, SoftPersona, ExternalKnowledge, InferenceOnly }
 
+    // Reflection is allowed to preserve attributed dialogue, but must not turn a Sim question or
+    // claim into a player belief. This is deliberately a narrow lexical provenance check rather
+    // than a general semantic validator: strong player-attribution summaries need a topical
+    // PlayerSaid event in the exact reflection delta.
+    internal static class ReflectionProvenanceGuard
+    {
+        private static readonly string[] PlayerAttribution = new string[]
+        {
+            "player confirmed", "player prefers", "player wants", "player likes", "player dislikes",
+            "player believes", "player intends", "player said", "player is "
+        };
+
+        internal static bool Allows(string summary, IList<SessionSocialEvent> evidence)
+        {
+            if (!HasStrongPlayerAttribution(summary)) return true;
+            HashSet<string> summaryTokens = Tokens(summary);
+            if (evidence == null) return false;
+            for (int i = 0; i < evidence.Count; i++)
+            {
+                SessionSocialEvent evt = evidence[i];
+                if (evt == null || evt.Provenance != SessionEventProvenance.PlayerSaid) continue;
+                if (Overlap(summaryTokens, Tokens(evt.Text)) > 0) return true;
+            }
+            return false;
+        }
+
+        internal static bool HasStrongPlayerAttribution(string summary)
+        {
+            string lower = (summary ?? string.Empty).ToLowerInvariant();
+            for (int i = 0; i < PlayerAttribution.Length; i++)
+                if (lower.IndexOf(PlayerAttribution[i], StringComparison.Ordinal) >= 0) return true;
+            return false;
+        }
+
+        private static HashSet<string> Tokens(string text)
+        {
+            string[] ignored = new string[] { "player", "confirmed", "prefers", "wants", "likes", "dislikes", "believes", "intends", "said", "still", "just", "that", "this", "with", "from", "have", "been", "more", "than", "about" };
+            HashSet<string> skip = new HashSet<string>(ignored, StringComparer.OrdinalIgnoreCase);
+            HashSet<string> result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            string[] pieces = Regex.Split((text ?? string.Empty).ToLowerInvariant(), @"[^a-z0-9']+");
+            for (int i = 0; i < pieces.Length; i++)
+            {
+                string token = pieces[i];
+                if (token.Length >= 3 && !skip.Contains(token)) result.Add(token);
+            }
+            return result;
+        }
+
+        private static int Overlap(HashSet<string> a, HashSet<string> b)
+        {
+            int count = 0;
+            foreach (string token in a) if (b.Contains(token)) count++;
+            return count;
+        }
+    }
+
     internal sealed class SemanticTurnRoute
     {
         internal SemanticTurnType TurnType;
@@ -186,6 +242,17 @@ namespace ErenshorDeepSims
                 Regex.IsMatch(lower, @"\bwhat do you think (?:is|are|happened|caused|drops|drop)\b");
             if (currentExternalFact || explicitGameFact) return;
 
+            bool personalIdentity = Regex.IsMatch(lower, @"\b(?:your background|your past|who are you|tell me about yourself|what did you study|what do you study|where did you grow up|what do you do for work|what(?:'s| is) your job|your career|how do you know me|how did we meet|were we|did we|do you remember|what do you remember about)\b");
+            if (personalIdentity)
+            {
+                route.TurnType = SemanticTurnType.SocialQuestion;
+                route.KnowledgeNeed = KnowledgeNeed.None;
+                route.SearchQuery = string.Empty;
+                route.DirectAnswerRequired = true;
+                route.SocialIntent = "answer_personal_identity_or_memory";
+                return;
+            }
+
             bool personalTaste = Regex.IsMatch(lower, @"\b(?:do you (?:like|love|enjoy|prefer)|would you (?:rather|prefer)|what do you (?:like|prefer)|what(?:'s| is) your (?:favorite|favourite)|your opinion|how do you feel about|what do you think (?:about|of)|what are you (?:reading|watching|listening to|playing))\b") ||
                 Regex.IsMatch(lower, @"\b(?:like|love|enjoy|prefer) being (?:a|an|the)?\s*\w+");
             if (!personalTaste) return;
@@ -291,14 +358,25 @@ namespace ErenshorDeepSims
         private const int MaxEvents = 64;
         private const int MaxChat = 12;
         private const int MaxSummaryChars = 1200;
+        internal const double AutonomousThreadHardCeilingSeconds = 60.0;
+        internal const double PlayerThreadHardCeilingSeconds = 120.0;
+        internal const double ThreadVisibleInactivitySeconds = 40.0;
         private readonly object _lock = new object();
         private readonly List<SessionSocialEvent> _events = new List<SessionSocialEvent>();
         private readonly List<SessionChatLine> _chat = new List<SessionChatLine>();
         private long _nextEventId = 1;
         private long _threadId;
         private string _threadTopic = string.Empty;
-        private DateTime _threadExpiresUtc = DateTime.MinValue;
+        private DateTime _threadStartedUtc = DateTime.MinValue;
+        private DateTime _threadLastActivityUtc = DateTime.MinValue;
+        private DateTime _threadLastVisibleUtc = DateTime.MinValue;
+        private DateTime _threadPendingUntilUtc = DateTime.MinValue;
+        private bool _threadInferencePending;
+        private bool _threadPlayerOwned;
+        private bool _threadOpen;
         private int _threadVisibleReplies;
+        private int _threadReplyCap = 1;
+        private string _pendingCloseDiagnostic = string.Empty;
         private long _lastReflectedEventId;
         private string _summary = string.Empty;
         private string _characterKey = string.Empty;
@@ -310,7 +388,10 @@ namespace ErenshorDeepSims
                 if (string.Equals(_characterKey, characterKey ?? string.Empty, StringComparison.Ordinal)) return;
                 _characterKey = characterKey ?? string.Empty;
                 _events.Clear(); _chat.Clear(); _summary = string.Empty; _threadId = 0; _threadTopic = string.Empty;
-                _threadVisibleReplies = 0; _threadExpiresUtc = DateTime.MinValue; _lastReflectedEventId = 0; _nextEventId = 1;
+                _threadVisibleReplies = 0; _threadStartedUtc = DateTime.MinValue; _threadLastActivityUtc = DateTime.MinValue;
+                _threadLastVisibleUtc = DateTime.MinValue; _threadPendingUntilUtc = DateTime.MinValue;
+                _threadInferencePending = false; _threadPlayerOwned = false; _threadOpen = false;
+                _threadReplyCap = 1; _pendingCloseDiagnostic = string.Empty; _lastReflectedEventId = 0; _nextEventId = 1;
             }
         }
 
@@ -318,10 +399,24 @@ namespace ErenshorDeepSims
         {
             lock (_lock)
             {
-                bool continueThread = _threadId > 0 && now <= _threadExpiresUtc &&
+                PruneThreadLocked(now);
+                bool continueThread = _threadOpen &&
                     (string.Equals(_threadTopic, topic, StringComparison.OrdinalIgnoreCase) || string.Equals(topic, "general party chat", StringComparison.OrdinalIgnoreCase));
-                if (!continueThread) { _threadId++; _threadTopic = topic ?? "general"; _threadVisibleReplies = 0; }
-                _threadExpiresUtc = now.AddSeconds(120.0);
+                if (!continueThread)
+                {
+                    if (_threadOpen) CloseThreadLocked("topic_changed", now);
+                    _threadId++;
+                    _threadTopic = topic ?? "general";
+                    _threadVisibleReplies = 0;
+                }
+                // Only an actual player-authored continuation may renew the player ceiling.
+                _threadStartedUtc = now;
+                _threadLastActivityUtc = now;
+                _threadLastVisibleUtc = now;
+                _threadPendingUntilUtc = DateTime.MinValue;
+                _threadInferencePending = false;
+                _threadPlayerOwned = true;
+                _threadOpen = true;
                 AddChatLocked(player, text, SessionEventProvenance.PlayerSaid, now, _threadId);
                 AddEventLocked("player_message", text, _threadTopic, SessionEventProvenance.PlayerSaid, new string[] { player }, 35, 1.0, _threadId, now);
                 return _threadId;
@@ -332,10 +427,60 @@ namespace ErenshorDeepSims
         {
             lock (_lock)
             {
+                PruneThreadLocked(now);
+                if (!_threadOpen)
+                {
+                    _threadId++;
+                    _threadTopic = "autonomous social";
+                    _threadStartedUtc = now;
+                    _threadPlayerOwned = false;
+                    _threadVisibleReplies = 0;
+                    _threadReplyCap = Math.Max(1, _threadReplyCap);
+                    _threadOpen = true;
+                }
                 AddChatLocked(speaker, text, SessionEventProvenance.SimSaid, now, _threadId);
                 AddEventLocked("sim_message", text, _threadTopic, SessionEventProvenance.SimSaid, new string[] { speaker }, 20, 0.6, _threadId, now);
                 _threadVisibleReplies++;
-                _threadExpiresUtc = now.AddSeconds(120.0);
+                _threadLastVisibleUtc = now;
+                _threadLastActivityUtc = now;
+                _threadPendingUntilUtc = DateTime.MinValue;
+            }
+        }
+
+        internal void NoteThreadPending(DateTime untilUtc, int replyCap, DateTime now)
+        {
+            lock (_lock)
+            {
+                if (!PruneThreadLocked(now)) return;
+                DateTime ceiling = _threadStartedUtc.AddSeconds(_threadPlayerOwned ? PlayerThreadHardCeilingSeconds : AutonomousThreadHardCeilingSeconds);
+                _threadPendingUntilUtc = untilUtc < ceiling ? untilUtc : ceiling;
+                _threadReplyCap = Math.Max(1, replyCap);
+                _threadLastActivityUtc = now;
+            }
+        }
+
+        internal void SetThreadInferencePending(bool pending, DateTime now)
+        {
+            lock (_lock)
+            {
+                if (!PruneThreadLocked(now)) return;
+                _threadInferencePending = pending;
+                if (pending) _threadLastActivityUtc = now;
+            }
+        }
+
+        internal void CloseThread(string reason, DateTime now)
+        {
+            lock (_lock) CloseThreadLocked(reason, now);
+        }
+
+        internal string ConsumeCloseDiagnostic()
+        {
+            lock (_lock)
+            {
+                string value = _pendingCloseDiagnostic;
+                _pendingCloseDiagnostic = string.Empty;
+                return value;
             }
         }
 
@@ -425,7 +570,55 @@ namespace ErenshorDeepSims
 
         internal string DescribeThread()
         {
-            lock (_lock) return "thread=" + _threadId + " topic=" + (_threadTopic.Length == 0 ? "none" : _threadTopic) + " visibleReplies=" + _threadVisibleReplies + " expires=" + (_threadExpiresUtc == DateTime.MinValue ? "none" : _threadExpiresUtc.ToString("HH:mm:ss"));
+            DateTime now = DateTime.UtcNow;
+            lock (_lock)
+            {
+                PruneThreadLocked(now);
+                double age = _threadStartedUtc == DateTime.MinValue ? 0.0 : Math.Max(0.0, (now - _threadStartedUtc).TotalSeconds);
+                double visibleAge = _threadLastVisibleUtc == DateTime.MinValue ? -1.0 : Math.Max(0.0, (now - _threadLastVisibleUtc).TotalSeconds);
+                double hardRemaining = !_threadOpen ? 0.0 : Math.Max(0.0,
+                    ((_threadStartedUtc.AddSeconds(_threadPlayerOwned ? PlayerThreadHardCeilingSeconds : AutonomousThreadHardCeilingSeconds)) - now).TotalSeconds);
+                double pendingEta = _threadPendingUntilUtc > now ? (_threadPendingUntilUtc - now).TotalSeconds : 0.0;
+                return "thread=" + _threadId + " state=" + (_threadOpen ? "active" : "closed") +
+                    " topic=" + (_threadTopic.Length == 0 ? "none" : _threadTopic) +
+                    " age=" + Math.Round(age) + "s lastVisibleAge=" + (visibleAge < 0 ? "none" : Math.Round(visibleAge) + "s") +
+                    " replies=" + _threadVisibleReplies + "/" + _threadReplyCap +
+                    " pendingFollowup=" + (_threadPendingUntilUtc > now ? "yes" : "no") +
+                    " inferencePending=" + (_threadInferencePending ? "yes" : "no") +
+                    " nextEta=" + Math.Round(pendingEta) + "s staleIn=" + Math.Round(hardRemaining) + "s";
+            }
+        }
+
+        internal bool HasActiveThread(DateTime now)
+        {
+            lock (_lock) return PruneThreadLocked(now);
+        }
+
+        private bool PruneThreadLocked(DateTime now)
+        {
+            if (!_threadOpen || _threadId <= 0 || _threadStartedUtc == DateTime.MinValue) return false;
+            double hard = _threadPlayerOwned ? PlayerThreadHardCeilingSeconds : AutonomousThreadHardCeilingSeconds;
+            if ((now - _threadStartedUtc).TotalSeconds >= hard)
+            {
+                CloseThreadLocked("hard_ceiling", now);
+                return false;
+            }
+            if (_threadInferencePending || _threadPendingUntilUtc > now) return true;
+            DateTime recent = _threadLastVisibleUtc > _threadLastActivityUtc ? _threadLastVisibleUtc : _threadLastActivityUtc;
+            if (recent != DateTime.MinValue && (now - recent).TotalSeconds <= ThreadVisibleInactivitySeconds) return true;
+            CloseThreadLocked("inactivity", now);
+            return false;
+        }
+
+        private void CloseThreadLocked(string reason, DateTime now)
+        {
+            if (!_threadOpen) return;
+            double age = _threadStartedUtc == DateTime.MinValue ? 0.0 : Math.Max(0.0, (now - _threadStartedUtc).TotalSeconds);
+            _pendingCloseDiagnostic = "[DeepSims][Thread] action=closed reason=" + (string.IsNullOrWhiteSpace(reason) ? "terminal" : reason) +
+                " thread=" + _threadId + " age=" + Math.Round(age) + "s replies=" + _threadVisibleReplies + "/" + _threadReplyCap;
+            _threadOpen = false;
+            _threadInferencePending = false;
+            _threadPendingUntilUtc = DateTime.MinValue;
         }
 
         private void AddChatLocked(string speaker, string text, SessionEventProvenance provenance, DateTime now, long thread)
@@ -609,6 +802,65 @@ namespace ErenshorDeepSims
             long thread = state.BeginPlayerTurn("Player", "i like being the tank", "class role preferences", DateTime.UtcNow);
             state.RecordVisibleSim("Fiora", "yeah, tanking fits if you like setting the pace", DateTime.UtcNow);
             state.RecordVisibleSim("Phanty", "healing has its own kind of stress too", DateTime.UtcNow);
+            lines.Add("[DeepSims Social] autonomous Sim dialogue is not a durable factual seed: " + Pass(state.BuildSeeds(DateTime.UtcNow).FindAll(delegate(SessionConversationSeed x) { return x.Provenance == SessionEventProvenance.SimSaid; }).Count == 0));
+            lines.Add("[DeepSims Social] subjective uncertainty with an opinion survives: " + Pass(!GroundingGuard.IsSubjectiveDeflection(PartyReplyIntent.Opinion, "i don't know, maybe i'd enjoy it")));
+            lines.Add("[DeepSims Social] bare casual uncertainty is allowed: " + Pass(!GroundingGuard.IsSubjectiveDeflection(PartyReplyIntent.Opinion, "i don't know")));
+            lines.Add("[DeepSims Social] gathering preference is classified subjective: " + Pass(SocialClaimClassifier.Classify("i like gathering more") == SocialClaimKind.SubjectiveSocial));
+            lines.Add("[DeepSims Social] healing dislike is classified subjective: " + Pass(SocialClaimClassifier.Classify("healing sounds stressful lol") == SocialClaimKind.SubjectiveSocial));
+            lines.Add("[DeepSims Social] all-caster hypothetical is classified subjective: " + Pass(SocialClaimClassifier.Classify("would you guys ever run an all-caster group?") == SocialClaimKind.SubjectiveSocial));
+            lines.Add("[DeepSims Social] unsupported boss history remains factual: " + Pass(SocialClaimClassifier.Classify("we killed a boss yesterday") == SocialClaimKind.CheckableFactual));
+            lines.Add("[DeepSims Social] unsupported item transfer remains factual: " + Pass(SocialClaimClassifier.Classify("Phanty gave me a sword") == SocialClaimKind.CheckableFactual));
+            lines.Add("[DeepSims Social] unsupported current news remains factual: " + Pass(SocialClaimClassifier.Classify("NASA launched something today") == SocialClaimKind.CheckableFactual));
+            lines.Add("[DeepSims Social] AI evidence boilerplate remains rejected: " + Pass(SocialClaimClassifier.Classify("Based on the available evidence, I cannot verify that") == SocialClaimKind.AiOrEngineeringLeak));
+            SilenceFatigueTracker fatigue = new SilenceFatigueTracker();
+            lines.Add("[DeepSims Social] first Lively silence keeps normal pressure: " + Pass(fatigue.NoteSilence(true) == SilenceFatiguePressure.Normal));
+            lines.Add("[DeepSims Social] second Lively silence strongly favors a safe seed: " + Pass(fatigue.NoteSilence(true) == SilenceFatiguePressure.Strong && fatigue.SilenceAdjustment <= -20.0));
+            lines.Add("[DeepSims Social] third Lively silence forces a safe seed attempt: " + Pass(fatigue.NoteSilence(true) == SilenceFatiguePressure.ForceSafeSeed));
+            fatigue.Reset();
+            lines.Add("[DeepSims Social] visible/player/combat reset contract is deterministic: " + Pass(fatigue.Consecutive == 0));
+            List<AmbientSeedCandidate> freeSeeds = AmbientSeedProducers.BuildDowntimeCandidates(SocialContextMode.Normal, null, null, DateTime.UtcNow);
+            int freeCount = freeSeeds.FindAll(delegate(AmbientSeedCandidate x) { return x != null && x.TopicKey.StartsWith("free_social_", StringComparison.Ordinal) && !x.HasFact; }).Count;
+            lines.Add("[DeepSims Social] fact-free social seed pool is always available: " + Pass(freeCount == 3));
+            DateTime threadStart = DateTime.UtcNow;
+            SocialSessionState bounded = new SocialSessionState();
+            bounded.ResetForCharacter("bounded-thread");
+            bounded.RecordVisibleSim("Fiora", "maybe we should head out soon", threadStart);
+            lines.Add("[DeepSims Social] visible opener creates active thread: " + Pass(bounded.HasActiveThread(threadStart.AddSeconds(1))));
+            bounded.RecordVisibleSim("Phanty", "yeah, probably", threadStart.AddSeconds(35));
+            lines.Add("[DeepSims Social] visible follow-up updates recent activity: " + Pass(bounded.HasActiveThread(threadStart.AddSeconds(50))));
+            lines.Add("[DeepSims Social] Sim replies cannot renew autonomous hard ceiling: " + Pass(!bounded.HasActiveThread(threadStart.AddSeconds(61))));
+            lines.Add("[DeepSims Social] 244-second zombie lock is impossible: " + Pass(!bounded.HasActiveThread(threadStart.AddSeconds(244))));
+            SocialSessionState pending = new SocialSessionState();
+            pending.ResetForCharacter("pending-thread");
+            pending.BeginPlayerTurn("Player", "what do you think?", "opinion", threadStart);
+            pending.NoteThreadPending(threadStart.AddSeconds(50), 3, threadStart);
+            lines.Add("[DeepSims Social] legitimate pending follow-up remains active: " + Pass(pending.HasActiveThread(threadStart.AddSeconds(45))));
+            pending.CloseThread("silence", threadStart.AddSeconds(46));
+            lines.Add("[DeepSims Social] terminal silence releases thread immediately: " + Pass(!pending.HasActiveThread(threadStart.AddSeconds(46))));
+            string[] terminalReasons = new string[] { "grounding_reject", "stale", "no_speaker", "inference_failure", "no_followup", "combat" };
+            bool terminalsClose = true;
+            for (int ti = 0; ti < terminalReasons.Length; ti++)
+            {
+                SocialSessionState terminal = new SocialSessionState(); terminal.ResetForCharacter("terminal-" + ti);
+                terminal.RecordVisibleSim("Fiora", "maybe", threadStart);
+                terminal.CloseThread(terminalReasons[ti], threadStart.AddSeconds(2));
+                if (terminal.HasActiveThread(threadStart.AddSeconds(2))) terminalsClose = false;
+            }
+            lines.Add("[DeepSims Social] rejection/stale/no-speaker/failure/combat all close: " + Pass(terminalsClose));
+            SocialSessionState staleThread = new SocialSessionState(); staleThread.ResetForCharacter("stale-threshold");
+            staleThread.RecordVisibleSim("Fiora", "maybe", threadStart);
+            lines.Add("[DeepSims Social] no visible or pending activity closes at stale threshold: " + Pass(!staleThread.HasActiveThread(threadStart.AddSeconds(41))));
+            SocialSessionState playerExtension = new SocialSessionState(); playerExtension.ResetForCharacter("player-extension");
+            long firstPlayerThread = playerExtension.BeginPlayerTurn("Player", "healing seems rough", "class opinion", threadStart);
+            long continuedPlayerThread = playerExtension.BeginPlayerTurn("Player", "but maybe fun", "class opinion", threadStart.AddSeconds(30));
+            lines.Add("[DeepSims Social] real player continuation extends relevant thread: " + Pass(firstPlayerThread == continuedPlayerThread && playerExtension.HasActiveThread(threadStart.AddSeconds(60))));
+            long replacedPlayerThread = playerExtension.BeginPlayerTurn("Player", "what about weather?", "weather", threadStart.AddSeconds(61));
+            lines.Add("[DeepSims Social] player topic change replaces old thread: " + Pass(replacedPlayerThread != continuedPlayerThread));
+            string closeDiagnostic = playerExtension.ConsumeCloseDiagnostic();
+            lines.Add("[DeepSims Social] thread close diagnostic contains no dialogue: " + Pass(closeDiagnostic.IndexOf("what about", StringComparison.OrdinalIgnoreCase) < 0 && closeDiagnostic.IndexOf("action=closed", StringComparison.OrdinalIgnoreCase) >= 0));
+            SilenceFatigueTracker quietParty = new SilenceFatigueTracker();
+            quietParty.NoteSilence(false); quietParty.NoteSilence(false); quietParty.NoteSilence(false);
+            lines.Add("[DeepSims Social] ineligible one-Sim/Normal/Quiet contexts gain no silence pressure: " + Pass(quietParty.Consecutive == 0));
             List<SessionChatLine> recent = state.RecentChat();
             lines.Add("[DeepSims Social] Sim B receives Sim A visible history: " + Pass(recent.Count == 3 && recent[1].Speaker == "Fiora" && recent[2].Speaker == "Phanty"));
             List<ConversationLine> visibleBanter = new List<ConversationLine>();

@@ -13,6 +13,9 @@ namespace ErenshorDeepSims
         private static readonly Dictionary<string, int> GuildIdBySim = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         private static readonly Dictionary<int, string> GuildNameById = new Dictionary<int, string>();
         private static DateTime _guildCacheUntilUtc = DateTime.MinValue;
+        private static readonly Dictionary<string, bool> FriendBySim = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        private static DateTime _friendCacheUntilUtc = DateTime.MinValue;
+        private static int _friendCacheCharacterSlot = int.MinValue;
 
         private static readonly string[] NameMembers = new string[] { "NPCName", "Name", "SimName" };
 
@@ -197,6 +200,12 @@ namespace ErenshorDeepSims
             SimSnapshot s = new SimSnapshot();
             s.RuntimeSim = sim;
             s.PartyActorId = PartyActorIdentity.ForSim(sim);
+            try
+            {
+                SimPlayerTracking tracking = sim.MySimTracking;
+                if (tracking != null) s.NativeStableSimId = tracking.simIndex;
+            }
+            catch { s.NativeStableSimId = -1; }
             s.Scene = CurrentSceneName();
 
             // Static half, resolved once per Sim object.
@@ -242,6 +251,7 @@ namespace ErenshorDeepSims
             else s.HpPercent = -1f;
 
             PopulateGuild(s);
+            PopulateFriendState(s);
             return s;
         }
 
@@ -296,6 +306,53 @@ namespace ErenshorDeepSims
             return p;
         }
 
+
+
+        private static void PopulateFriendState(SimSnapshot snapshot)
+        {
+            if (snapshot == null || string.IsNullOrWhiteSpace(snapshot.Name)) return;
+            RefreshFriendCacheIfNeeded();
+            bool friend;
+            if (FriendBySim.TryGetValue(snapshot.Name, out friend))
+            {
+                snapshot.FriendStateKnown = true;
+                snapshot.IsFriend = friend;
+            }
+        }
+
+        private static void RefreshFriendCacheIfNeeded()
+        {
+            int currentSlot = int.MinValue;
+            try { currentSlot = GameData.CurrentCharacterSlot.index; }
+            catch { currentSlot = int.MinValue; }
+
+            DateTime now = DateTime.UtcNow;
+            if (currentSlot == _friendCacheCharacterSlot && now < _friendCacheUntilUtc) return;
+            _friendCacheUntilUtc = now.AddSeconds(5.0);
+            _friendCacheCharacterSlot = currentSlot;
+            FriendBySim.Clear();
+            if (currentSlot < 0) return;
+
+            try
+            {
+                if (GameData.SimMngr == null || GameData.SimMngr.Sims == null) return;
+                List<SimPlayerTracking> sims = GameData.SimMngr.Sims;
+                for (int i = 0; i < sims.Count; i++)
+                {
+                    SimPlayerTracking tracking = sims[i];
+                    if (tracking == null) continue;
+                    string name = ReadString(tracking, new string[] { "SimName", "Name" }, string.Empty);
+                    if (string.IsNullOrWhiteSpace(name)) continue;
+                    // Native /friend writes the acting character slot here and clears it to -1
+                    // on unfriend; this is the same predicate used by current Party Tools/Nemesis.
+                    FriendBySim[name] = tracking.FriendedBy == currentSlot && !tracking.IsGMCharacter;
+                }
+            }
+            catch
+            {
+                FriendBySim.Clear();
+            }
+        }
 
         private static void PopulateGuild(SimSnapshot snapshot)
         {

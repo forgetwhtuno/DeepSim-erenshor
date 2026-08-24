@@ -232,6 +232,22 @@ namespace ErenshorDeepSims
             catch { }
         }
 
+        internal static void DescribeBackground(string lane, int sessionGeneration, int conversationGeneration,
+            string verifiedSourceId, string correlationId)
+        {
+            PromptCapturePacket packet = Current;
+            if (packet == null) return;
+            try
+            {
+                packet.Lane = lane ?? string.Empty;
+                packet.SessionGeneration = sessionGeneration;
+                packet.ConversationGeneration = conversationGeneration;
+                packet.VerifiedSourceId = verifiedSourceId ?? string.Empty;
+                packet.CorrelationId = correlationId ?? string.Empty;
+            }
+            catch { }
+        }
+
         // The raw, pre-resolution Deep Sims "Model" config value, recorded independently of the
         // resolved model actually used for generation. In a healthy single-model session these always
         // agree; capturing both lets a packet prove that rather than assume it.
@@ -275,7 +291,11 @@ namespace ErenshorDeepSims
         {
             PromptCapturePacket packet = Current;
             if (packet == null) return;
-            try { if (string.IsNullOrEmpty(packet.RawModelContent)) packet.RawModelContent = raw ?? string.Empty; }
+            try
+            {
+                SyncCorrelation(packet);
+                if (string.IsNullOrEmpty(packet.RawModelContent)) packet.RawModelContent = raw ?? string.Empty;
+            }
             catch { }
         }
 
@@ -293,6 +313,7 @@ namespace ErenshorDeepSims
             if (packet == null) return;
             try
             {
+                SyncCorrelation(packet);
                 packet.GroundingDecision = decision ?? "unknown";
                 packet.GroundingReason = reason ?? string.Empty;
                 packet.GroundingReasonCategory = PromptCaptureReasonCategory.Classify(reason);
@@ -340,9 +361,55 @@ namespace ErenshorDeepSims
             if (packet == null) return;
             try
             {
+                SyncCorrelation(packet);
                 packet.Displayed = displayed;
                 packet.FinalSource = source ?? string.Empty;
                 packet.FinalVisibleContent = visibleText ?? string.Empty;
+            }
+            catch { }
+        }
+
+        internal static void RecordQueueAccepted(bool accepted)
+        {
+            PromptCapturePacket packet = Current;
+            if (packet == null) return;
+            try
+            {
+                packet.QueueAccepted = accepted;
+                if (!accepted) packet.VisibilityDisposition = "queue_rejected";
+                else if (packet.VisibilityDisposition == "not_applicable") packet.VisibilityDisposition = "queued";
+            }
+            catch { }
+        }
+
+        internal static void RecordAdvancedBeforeVisibility(AutonomousAdvanceObservation observation)
+        {
+            RecordAdvancedBeforeVisibility(Current, observation);
+        }
+
+        internal static void RecordAdvancedBeforeVisibility(PromptCapturePacket packet, AutonomousAdvanceObservation observation)
+        {
+            if (packet == null || observation == null) return;
+            try
+            {
+                packet.TopicFatigueAdvanced = observation.TopicFatigueAdvanced;
+                packet.ConversationMomentAdded = observation.ConversationMomentAdded;
+                packet.PreferencePersisted = observation.PreferencePersisted;
+                packet.CallbackStateAdvanced = observation.CallbackStateAdvanced;
+            }
+            catch { }
+        }
+
+        internal static void RecordVisibility(PromptCapturePacket packet, bool visible, string disposition, string visibleText)
+        {
+            if (packet == null) return;
+            try
+            {
+                SyncCorrelation(packet);
+                packet.Displayed = visible;
+                packet.FinalSource = visible ? "LLM" : "none";
+                packet.FinalVisibleContent = visible ? (visibleText ?? string.Empty) : string.Empty;
+                packet.VisibilityDisposition = CognitionObservability.BoundedToken(disposition);
             }
             catch { }
         }
@@ -354,6 +421,18 @@ namespace ErenshorDeepSims
                 PromptCapturePacket packet = Current;
                 return packet == null ? 0 : packet.RequestId;
             }
+        }
+
+        internal static void SyncCorrelation(PromptCapturePacket packet)
+        {
+            if (packet == null) return;
+            DialogueRequestCorrelation current = DialogueRequestCorrelation.Current;
+            if (current == null) return;
+            packet.CorrelationRequestId = current.RequestId;
+            packet.CorrelationAttempt = current.Attempt;
+            packet.CorrelationThreadId = current.ThreadId;
+            packet.CorrelationCandidateHash = current.CandidateHash ?? string.Empty;
+            packet.CorrelationDisposition = current.Disposition ?? string.Empty;
         }
     }
 
@@ -377,6 +456,18 @@ namespace ErenshorDeepSims
         }
 
         internal PromptCapturePacket Packet { get { return _packet; } }
+
+        // Detach a packet from the ambient scope so final visibility can complete it later at the
+        // Unity-thread display boundary. This changes only diagnostic ownership; production output
+        // remains in the existing queue.
+        internal PromptCapturePacket DeferCompletion()
+        {
+            PromptCapturePacket packet = _packet;
+            _packet = null;
+            try { if (_slot != null) _slot.Value = _previous; }
+            catch { }
+            return packet;
+        }
 
         public void Dispose()
         {

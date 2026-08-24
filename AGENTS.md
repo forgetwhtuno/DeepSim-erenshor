@@ -9,8 +9,13 @@ This repository contains **Deep Sims for Erenshor**, a native-Lunaris migration 
 
 The project goal is to make Sims feel like persistent MMO friends: aware of the current party, recent fights, shared history, loot, zones, and conversations, while still behaving like Erenshor Sims rather than AI assistants.
 
-**Current development line:** 0.7.x
-**Current development baseline:** 0.7.1 native-Lunaris migration candidate
+**Current development line:** 0.8.x
+**Current development baseline:** 0.8.2 public-beta release candidate
+
+Post-beta future work only: named/switchable in-world role profiles such as priest,
+adventurer, or mercenary. Do not add that persistence/UI axis during 0.8.2 release
+hardening. The beta identity contract remains native verified identity + one in-world
+Erenshor persona + one fictional MMO-player background + bounded character-scoped memory.
 
 ---
 

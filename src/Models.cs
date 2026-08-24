@@ -73,6 +73,22 @@ namespace ErenshorDeepSims
         public int CompetitivePlayerExchanges;
         public int VerifiedPracticeDuels;
         public int RelationshipDataVersion;
+        // Layered identity/memory schema. Author-defined fields are authoritative and are never
+        // overwritten by learned dialogue or relationship drift. StructuredMemories contains
+        // learned/verified records; legacy lists remain intact for backward compatibility.
+        public int IdentityDataVersion;
+        // Fictional out-of-character player layer used only in MMO perspective. This is generated
+        // once from stable Sim identity and persisted in the Deep Sims sidecar so "IRL" answers do
+        // not invent a different job/school/life every session. It is never a native Erenshor fact.
+        public string GeneratedSimulatedPlayerBackground;
+        public string GeneratedSimulatedPlayerBackgroundVersion;
+        // Stable fictional character motivations generated from the same bounded identity bundle.
+        // Non-empty values are migration-preserved; authored fields remain authoritative overrides.
+        public string GeneratedLongTermWants;
+        public string GeneratedCaresAbout;
+        public string GeneratedIdentityMotivationVersion;
+        public AuthoredIdentityProfile AuthoredIdentity;
+        public List<StructuredMemoryRecord> StructuredMemories;
         public List<MemoryEvent> RecentEvents;
         public List<string> ImportantMemories;
         public List<string> RecentGroupChat;
@@ -82,6 +98,9 @@ namespace ErenshorDeepSims
         public int TotalGroupedMinutes;
         public List<string> ConversationSummaries;
         public List<SimRelationshipMemory> SimRelationships;
+        // Living-social pairwise state persists separately from transient affect. It is bounded,
+        // participant-scoped, and cannot command native Erenshor behavior.
+        public List<SocialRelationshipMemory> SocialRelationships;
         // Flavor continuity only. These are the Sim's own previously emitted opinions, never
         // authoritative game facts and never part of the verified event corpus.
         public List<SimPreferenceMemory> Preferences;
@@ -95,8 +114,20 @@ namespace ErenshorDeepSims
             if (OutingSummaries == null) OutingSummaries = new List<string>();
             if (ConversationSummaries == null) ConversationSummaries = new List<string>();
             if (SimRelationships == null) SimRelationships = new List<SimRelationshipMemory>();
+            if (SocialRelationships == null) SocialRelationships = new List<SocialRelationshipMemory>();
+            for (int i = SocialRelationships.Count - 1; i >= 0; i--)
+            {
+                if (SocialRelationships[i] == null) SocialRelationships.RemoveAt(i); else SocialRelationships[i].Normalize();
+            }
+            if (SocialRelationships.Count > 24) SocialRelationships.RemoveRange(0, SocialRelationships.Count - 24);
             if (Preferences == null) Preferences = new List<SimPreferenceMemory>();
             if (Preferences.Count > 8) Preferences.RemoveRange(0, Preferences.Count - 8);
+            if (GeneratedSimulatedPlayerBackground == null) GeneratedSimulatedPlayerBackground = string.Empty;
+            if (GeneratedSimulatedPlayerBackgroundVersion == null) GeneratedSimulatedPlayerBackgroundVersion = string.Empty;
+            if (GeneratedLongTermWants == null) GeneratedLongTermWants = string.Empty;
+            if (GeneratedCaresAbout == null) GeneratedCaresAbout = string.Empty;
+            if (GeneratedIdentityMotivationVersion == null) GeneratedIdentityMotivationVersion = string.Empty;
+            IdentitySchema.Normalize(this);
             if (LastOutingUtc == null) LastOutingUtc = string.Empty;
             if (Name == null) Name = string.Empty;
             if (SimKey == null) SimKey = string.Empty;
@@ -112,6 +143,10 @@ namespace ErenshorDeepSims
     public class SimSnapshot
     {
         public string Key;
+        // Native persistent SimPlayerTracking.simIndex when the live tracking object can be read.
+        // This is deliberately runtime-only: optional integrations such as Nemesis may require an
+        // exact native identity match, but it must never alter Deep Sims' name-keyed memory schema.
+        public int NativeStableSimId = -1;
         // Process-stable current-session identity derived from SimPlayerTracking when available.
         // This is used only for live party authority/revalidation, never persisted as Sim memory.
         public string PartyActorId;
@@ -139,6 +174,10 @@ namespace ErenshorDeepSims
         public string TiedToSlot;
         public int GuildId;
         public string GuildName;
+        // Native friend state is scoped to the current Erenshor character slot. FriendStateKnown
+        // distinguishes a proven non-friend from startup/transition uncertainty.
+        public bool FriendStateKnown;
+        public bool IsFriend;
         public string CombatRole;
         // Exact, read-only Erenshor Manage Roles assignments. Empty + known means no role is
         // assigned to this Sim; unknown means the native grouping state could not be read safely.
@@ -215,9 +254,22 @@ namespace ErenshorDeepSims
     public class CampEventFact
     {
         public long Sequence;
+        public string EventId;
+        public string Source;
+        public string SessionId;
+        public string Mode;
         public string Type;
         public string Zone;
         public string Detail;
+        public string PartyNames;
+        public string ParticipantName;
+        public string Counterpart;
+        public string SubjectCategory;
+        public string SubjectSource;
+        public string PresentationCategory;
+        public int ContractVersion;
+        public bool MeaningfulKnown;
+        public bool Meaningful;
     }
 
     public class EncounterSnapshot
@@ -264,9 +316,14 @@ namespace ErenshorDeepSims
     {
         public string Speaker;
         public string Text;
+        // Prompt-context dedupe keeps one canonical line while retaining the social fact that the
+        // speaker repeated it. This field is transient conversation context, not verified memory.
+        public int RecurrenceCount;
 
-        public ConversationLine() { }
-        public ConversationLine(string speaker, string text) { Speaker = speaker; Text = text; }
+        public ConversationLine() { RecurrenceCount = 1; }
+        public ConversationLine(string speaker, string text) { Speaker = speaker; Text = text; RecurrenceCount = 1; }
+        public ConversationLine(string speaker, string text, int recurrenceCount)
+        { Speaker = speaker; Text = text; RecurrenceCount = Math.Max(1, recurrenceCount); }
     }
 
     public class WikiResult

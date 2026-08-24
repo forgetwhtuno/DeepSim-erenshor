@@ -197,6 +197,11 @@ namespace ErenshorDeepSims
             return true;
         }
 
+        internal static bool TryParseIdentity(string raw, out string argument)
+        {
+            return TryParseSimpleArgument(raw, "/dsidentity", out argument);
+        }
+
         internal static bool TryParseExport(string raw, out string argument)
         {
             argument = null;

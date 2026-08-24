@@ -176,11 +176,16 @@ try {
     $lunarisInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($LunarisDll)
     $lunarisHash = (Get-FileHash -Algorithm SHA256 -Path $LunarisDll).Hash.ToLowerInvariant()
 
-    Write-Host "Building Deep Sims 0.7.6 as a native Lunaris plugin..." -ForegroundColor Cyan
+    Write-Host "Building Deep Sims 0.8.2 Beta as a native Lunaris plugin..." -ForegroundColor Cyan
     Write-Host "  Game:    $GameDir"
     Write-Host "  Lunaris: $LunarisDll"
     Write-Host "  Version: $($lunarisInfo.FileVersion)"
     Write-Host "  SHA256:  $lunarisHash"
+    Write-Host "  Compile reference SHA-256:" -ForegroundColor DarkCyan
+    foreach ($referencePath in ($Refs | Select-Object -Unique)) {
+        $referenceHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $referencePath).Hash.ToLowerInvariant()
+        Write-Host "    $([System.IO.Path]::GetFileName($referencePath))  $referenceHash"
+    }
 
     & $Csc "@$Rsp"
     if ($LASTEXITCODE -ne 0) { throw "Compilation failed. Copy the compiler errors and send them to me." }
@@ -193,7 +198,7 @@ try {
         Copy-Item -LiteralPath $TempDll -Destination $CandidateDll -Force
         $candidateHash = (Get-FileHash -Algorithm SHA256 -Path $CandidateDll).Hash.ToLowerInvariant()
         Write-Host ""
-        Write-Host "Deep Sims 0.7.6 compiled successfully (BuildOnly - nothing installed)." -ForegroundColor Green
+        Write-Host "Deep Sims 0.8.2 Beta compiled successfully (BuildOnly - nothing installed)." -ForegroundColor Green
         Write-Host "  Candidate DLL: $CandidateDll"
         Write-Host "  SHA256:        $candidateHash"
         if (Test-Path $OutDll) {
@@ -211,12 +216,23 @@ try {
         if ($erenshorRunning) {
             throw "Erenshor is currently running. Refusing to replace the installed plugin DLL while the game is running - close the game first, or rerun with -BuildOnly to just compile."
         }
-        # Copy only after a complete successful compile so Lunaris' file watcher never sees a partial DLL.
-        Copy-Item -LiteralPath $TempDll -Destination $OutDll -Force
+        # Retain the exact candidate bytes, then install that same file so post-install SHA
+        # verification compares one artifact rather than two separate compiler emissions.
+        $BuildOutputDir = Join-Path $ScriptRoot "build-output"
+        New-Item -ItemType Directory -Force -Path $BuildOutputDir | Out-Null
+        $CandidateDll = Join-Path $BuildOutputDir "ErenshorDeepSims.dll"
+        Copy-Item -LiteralPath $TempDll -Destination $CandidateDll -Force
+        Copy-Item -LiteralPath $CandidateDll -Destination $OutDll -Force
+        $candidateHash = (Get-FileHash -Algorithm SHA256 -Path $CandidateDll).Hash.ToLowerInvariant()
+        $installedHash = (Get-FileHash -Algorithm SHA256 -Path $OutDll).Hash.ToLowerInvariant()
+        if ($candidateHash -ne $installedHash) { throw "Installed DLL hash does not match the retained candidate." }
 
         Write-Host ""
-        Write-Host "Deep Sims 0.7.6 installed as a native Lunaris plugin." -ForegroundColor Green
+        Write-Host "Deep Sims 0.8.2 Beta installed as a native Lunaris plugin." -ForegroundColor Green
         Write-Host "  Plugin: $OutDll"
+        Write-Host "  Candidate SHA256: $candidateHash"
+        Write-Host "  Installed SHA256: $installedHash"
+        Write-Host "  Match installed: $($candidateHash -eq $installedHash)"
         Write-Host "  Config: $ConfigRoot\erenshordeepsims.lpcfg"
         Write-Host "  Memory: $MemoryDir"
         Write-Host ""

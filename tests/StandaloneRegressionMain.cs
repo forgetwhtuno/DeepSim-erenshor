@@ -16,6 +16,9 @@ namespace ErenshorDeepSims
             result = PrintAndCheck(QualityReliabilityDeterministicTests.Run(), result);
             result = PrintAndCheck(ConversationTurnGuardTests.Run(), result);
             result = PrintAndCheck(ConversationPacingTests.Run(), result);
+            result = PrintAndCheck(SocialSituationDeterministicTests.Run(), result);
+            result = PrintAndCheck(AutonomousSocialSchedulerDeterministicTests.Run(), result);
+            result = PrintAndCheck(ConversationSeedRuntimeDeterministicTests.Run(), result);
             result = PrintAndCheck(RoleplayDeterministicTests.RunSelfTests(), result);
             result = PrintAndCheck(CharacterScopeDeterministicTests.Run(), result);
             result = PrintAndCheck(DeepSimsControlPolicyTests.Run(), result);
@@ -23,10 +26,15 @@ namespace ErenshorDeepSims
             result = PrintAndCheck(LivePartyGroundingTests.Run(), result);
             result = PrintAndCheck(SocialOverhaulDeterministicTests.Run(), result);
             result = PrintAndCheck(PromptCaptureDeterministicTests.Run(), result);
+            result = PrintAndCheck(CognitionObservabilityDeterministicTests.Run(), result);
+            result = PrintAndCheck(SimMemoryPersistenceDeterministicTests.Run(), result);
             result = PrintAndCheck(DeepSimsModelResolutionTests.Run(), result);
             result = PrintAndCheck(ShouldReplyDeterministic.RunSelfTests(), result);
             result = PrintAndCheck(SimResponseDecision.RunSelfTests(), result);
             result = PrintAndCheck(RecentEventQuestionPolicy.RunSelfTests(), result);
+            result = PrintAndCheck(IdentityContextDeterministicTests.Run(), result);
+            result = PrintAndCheck(LiveSocialQualityDeterministicTests.Run(), result);
+            result = PrintAndCheck(RecentLifeCurrentEventsDeterministicTests.Run(), result);
             return result;
         }
 
